@@ -1,10 +1,10 @@
 // Service worker: funcționare offline + verificare expirări în fundal.
 importScripts('js/reminder-core.js');
 
-const CACHE = 'bonuri-v2';
+const CACHE = 'bonuri-v3';
 const SHELL = [
   './', 'index.html', 'css/styles.css', 'js/app.js', 'js/db.js', 'js/parsers.js', 'js/ocr.js',
-  'js/reminder-core.js', 'js/sanitize.js', 'js/crypto.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
+  'js/reminder-core.js', 'js/sanitize.js', 'js/crypto.js', 'js/preprocess.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
 self.addEventListener('install', (e) => {

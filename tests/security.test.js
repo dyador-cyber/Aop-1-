@@ -64,3 +64,12 @@ test('backup criptat: dus-întors și parolă greșită', async () => {
   await assert.rejects(decryptText(tampered, 'parola-lunga-123'));
   await assert.rejects(decryptText({ ...enc, iterations: 1 }, 'parola-lunga-123'), /invalid/);
 });
+
+test('poze suplimentare: doar raster, maxim 9', () => {
+  const jpg = new Blob([new Uint8Array(4)], { type: 'image/jpeg' });
+  const svg = new Blob(['<svg/>'], { type: 'image/svg+xml' });
+  const e = sanitize('expenses', { id: 'e1', date: '2026-01-01', extraImages: [jpg, svg, 'x', ...Array(20).fill(jpg)] });
+  assert.equal(e.extraImages.length, 9);
+  assert.ok(e.extraImages.every((b) => b.type === 'image/jpeg'));
+  assert.deepEqual(sanitize('expenses', { id: 'e2', date: '2026-01-01', extraImages: 'nu' }).extraImages, []);
+});

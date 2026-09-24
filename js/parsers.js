@@ -25,7 +25,8 @@ export function parseAmount(str) {
   return Number.isFinite(n) ? n : NaN;
 }
 
-const AMOUNT_RE = /(\d{1,3}(?:[ .]\d{3})+|\d+)[,.](\d{2})(?!\d)/g;
+// sumă cu 2 zecimale, dar nu bucăți din date/ore (23.09.2026, 12.38.40)
+const AMOUNT_RE = /(?<![\d.,/:-])(\d{1,3}(?:[ .]\d{3})+|\d+)[,.](\d{2})(?!\d|[.,/:-]\d)/g;
 
 function amountsIn(line) {
   const out = [];
@@ -35,6 +36,8 @@ function amountsIn(line) {
 
 const FUEL_WORDS = /\b(motorina|benzina|diesel|gpl|efix|maxx?motion|ultimate|euro ?diesel|euro ?super|premium ?95|standard ?95|carburant)\b/;
 
+const HEADER_NOISE = /\b(bon|ron)\s*(ne)?f[it]?[it]?scal|fiscal|nefiscal|bine ati venit|welcome/;
+
 const STORE_HINTS = [
   { key: 'fuel', words: ['omv', 'petrom', 'rompetrol', 'mol ', 'lukoil', 'socar', 'gazprom', 'benzinaria'] },
   { key: 'house_materials', words: ['dedeman', 'leroy', 'hornbach', 'brico', 'arabesque', 'materiale de constructii', 'praktiker', 'mathaus', 'ciment', 'adeziv', 'bca', 'caramida'] },
@@ -43,40 +46,55 @@ const STORE_HINTS = [
   { key: 'food', words: ['kaufland', 'lidl', 'mega image', 'carrefour', 'auchan', 'profi', 'penny', 'cora', 'selgros', 'metro', 'la doi pasi', 'annabella'] },
 ];
 
-export function parseReceipt(text) {
+export function parseReceipt(text, today = new Date()) {
   const raw = String(text || '');
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const norm = normalize(raw);
   const result = { store: '', date: '', total: null, cif: '', fuel: null, suggestedCategoryKey: null };
 
-  // Magazin: prima linie cu litere suficiente
-  const storeLine = lines.find((l) => (l.match(/[A-Za-zĂÂÎȘȚăâîșț]/g) || []).length >= 3);
-  if (storeLine) result.store = storeLine.replace(/\s{2,}/g, ' ').slice(0, 60);
+  // Magazin: linia cu SRL/SA sau un magazin cunoscut; altfel prima linie „curată” din antet
+  const letters = (l) => (l.match(/[A-Za-zĂÂÎȘȚăâîșț]/g) || []).length;
+  const isNoise = (l) => letters(l) < 4 || letters(l) / l.replace(/\s/g, '').length < 0.6 || HEADER_NOISE.test(normalize(l));
+  const head = lines.slice(0, 12);
+  const storeLine = head.find((l) => /\b(s\.?\s?r\.?\s?l|s\.?\s?a)\b\.?/i.test(l) && !isNoise(l))
+    || head.find((l) => STORE_HINTS.some((h) => h.words.some((w) => normalize(l).includes(w.trim()))))
+    || head.find((l) => !isNoise(l));
+  if (storeLine) result.store = storeLine.replace(/\s{2,}/g, ' ').trim().slice(0, 60);
 
   // CIF
-  const cif = raw.match(/C\.?\s*I\.?\s*F\.?\s*[:.]?\s*(RO\s*)?(\d{4,10})/i);
-  if (cif) result.cif = (cif[1] ? 'RO' : '') + cif[2];
+  // „CUI”/„CIF” (OCR citește uneori „I” ca „l”/„1”), cifre posibil despărțite de spații
+  const cif = raw.match(/(?:C\.?\s*[I1l]\.?\s*F|C\.?\s*U\.?\s*[I1l]|COD\s+FISCAL)\.?\s*[:.]?\s*(R\s*[O0]\s*)?(\d(?:\s?\d){3,9})(?!\d)/i);
+  if (cif) result.cif = (cif[1] ? 'RO' : '') + cif[2].replace(/\s/g, '');
 
   // Data
-  const d1 = raw.match(/\b(\d{2})[./-](\d{2})[./-](\d{4})\b/);
-  const d2 = raw.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
-  if (d1 && +d1[2] >= 1 && +d1[2] <= 12 && +d1[1] >= 1 && +d1[1] <= 31) {
-    result.date = `${d1[3]}-${d1[2]}-${d1[1]}`;
-  } else if (d2) {
-    result.date = `${d2[1]}-${d2[2]}-${d2[3]}`;
-  }
+  // Data: bonurile o conțin adesea de mai multe ori, iar OCR-ul poate greși o cifră pe un rând.
+  // Adunăm toate datele valide, eliminăm datele din viitor și alegem pe cea mai frecventă
+  // (la egalitate, pe cea mai recentă).
+  const maxDate = iso(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1));
+  const counts = new Map();
+  const add = (y, m, d) => {
+    if (+m < 1 || +m > 12 || +d < 1 || +d > 31) return;
+    const v = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    if (v <= maxDate) counts.set(v, (counts.get(v) || 0) + 1);
+  };
+  for (const m of raw.matchAll(/(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](20\d{2})(?!\d)/g)) add(m[3], m[2], m[1]);
+  for (const m of raw.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g)) add(m[1], m[2], m[3]);
+  const bestDate = [...counts].sort((a, b) => b[1] - a[1] || b[0].localeCompare(a[0]))[0];
+  if (bestDate) result.date = bestDate[0];
 
   // Total: linia cu „TOTAL” (nu SUBTOTAL / TOTAL TVA)
   let total = null;
   for (let i = 0; i < lines.length; i++) {
     const n = normalize(lines[i]);
-    if (!/\btotal\b/.test(n) || /subtotal|total\s*tva|tva\s*total|total\s*taxe/.test(n)) continue;
-    let nums = amountsIn(lines[i]);
+    // „TOTAL” poate fi citit greșit de OCR ca „ITAL”, „T0TAL”, „OTAL” la început de rând
+    const isTotal = /\bt[o0]tal\b/.test(n) || /^[^a-z0-9]{0,3}[a-z]?[it1l]?[o0]?tal\b\s*[:.]?\s*(lei|ron)?/.test(n);
+    if (!isTotal || /subtotal|total\s*tva|tva\s*total|total\s*taxe/.test(n)) continue;
+    let nums = amountsIn(lines[i].replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3'));
     if (!nums.length && lines[i + 1]) nums = amountsIn(lines[i + 1]);
     if (nums.length) { total = nums[nums.length - 1]; break; }
   }
   if (total == null) {
-    const all = lines.flatMap(amountsIn);
+    const all = lines.filter((l) => !/\d{1,2}[./-]\d{1,2}[./-]20\d{2}/.test(l)).flatMap(amountsIn);
     if (all.length) total = Math.max(...all);
   }
   result.total = total;

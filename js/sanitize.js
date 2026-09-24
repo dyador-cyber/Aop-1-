@@ -22,7 +22,8 @@ const SCHEMAS = {
   expenses: (o) => ({
     id: id(o.id), date: date(o.date), total: numOrNull(o.total, -1e9, 1e9), store: str(o.store, 120),
     categoryId: id(o.categoryId), projectId: id(o.projectId), vehicleId: id(o.vehicleId),
-    notes: str(o.notes, 2000), ocrText: str(o.ocrText, 20000), image: image(o.image),
+    notes: str(o.notes, 2000), ocrText: str(o.ocrText, 100000), image: image(o.image),
+    extraImages: (Array.isArray(o.extraImages) ? o.extraImages : []).map(image).filter(Boolean).slice(0, 9),
     fuel: o.fuel && typeof o.fuel === 'object' ? {
       liters: numOrNull(o.fuel.liters, 0, 1e5), pricePerLiter: numOrNull(o.fuel.pricePerLiter, 0, 1e4),
       km: numOrNull(o.fuel.km, 0, 1e8), fuelType: str(o.fuel.fuelType, 30),

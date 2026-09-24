@@ -49,15 +49,16 @@ function toast(msg) {
   toast.timer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
-const urlCache = new Map();
-function imgURL(obj) {
-  if (!obj?.image) return '';
-  if (!urlCache.has(obj.id) || urlCache.get(obj.id).blob !== obj.image) {
-    if (urlCache.has(obj.id)) URL.revokeObjectURL(urlCache.get(obj.id).url);
-    urlCache.set(obj.id, { blob: obj.image, url: URL.createObjectURL(obj.image) });
-  }
-  return urlCache.get(obj.id).url;
+const blobURLs = new WeakMap();
+function blobURL(blob) {
+  if (!(blob instanceof Blob)) return '';
+  if (!blobURLs.has(blob)) blobURLs.set(blob, URL.createObjectURL(blob));
+  return blobURLs.get(blob);
 }
+const imgURL = (obj) => blobURL(obj?.image);
+const photosOf = (exp) => [exp.image, ...(exp.extraImages || [])].filter(Boolean);
+const MAX_PHOTOS = 10;
+const PART_SEP = '\n--- continuare bon ---\n';
 
 async function compressImage(file, maxSide) {
   try { return await compressRaw(file, maxSide); } catch (e) { toast(e.message); return null; }
@@ -139,7 +140,7 @@ function expenseRow(e) {
   return `<li class="row" data-action="edit-expense" data-id="${esc(e.id)}">
     ${img ? `<img class="thumb" src="${img}" alt="">` : '<div class="thumb ph">🧾</div>'}
     <div class="grow">
-      <div class="title">${esc(e.store || 'Fără nume')}</div>
+      <div class="title">${esc(e.store || 'Fără nume')}${e.extraImages?.length ? ` <span class="muted small">📄×${e.extraImages.length + 1}</span>` : ''}</div>
       <div class="sub">${fmtDate(e.date)} · <span class="dot" style="background:${esc(cat?.color || '#999')}"></span>${esc(cat?.name || 'Fără categorie')}${proj ? ' · 📁 ' + esc(proj.name) : ''}${fuel}</div>
     </div>
     <div class="amount">${money(e.total)}</div>
@@ -394,12 +395,12 @@ function renderSettings() {
 }
 
 // ---------- formular bon ----------
-function openExpense(exp, { runOcr = false } = {}) {
+function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
   const isNew = !state.expenses.some((e) => e.id === exp.id);
   const cat = catById(exp.categoryId);
   const html = `
   <form id="exp-form" class="form">
-    ${exp.image ? `<a href="${imgURL(exp)}" target="_blank" rel="noopener noreferrer"><img class="preview" src="${imgURL(exp)}" alt="bon"></a>` : ''}
+    <div id="exp-photos"></div>
     <div id="ocr-status" class="ocr ${runOcr ? '' : 'hidden'}">🔍 Citesc bonul… <progress max="1" value="0"></progress></div>
     <div class="grid2">
       <label>Data<input name="date" type="date" value="${esc(exp.date)}" required></label>
@@ -424,7 +425,7 @@ function openExpense(exp, { runOcr = false } = {}) {
     <details><summary>Text citit de pe bon</summary><textarea name="ocrText" rows="6">${esc(exp.ocrText)}</textarea></details>
     <div class="actions">
       ${isNew ? '' : '<button type="button" class="danger" id="exp-del">Șterge</button>'}
-      ${exp.image ? '<button type="button" id="exp-ocr">🔍 Recitește</button>' : '<button type="button" id="exp-photo">📷 Adaugă poză</button>'}
+      ${exp.image ? '<button type="button" id="exp-ocr">🔍 Recitește</button><button type="button" id="exp-more">➕ Continuare bon</button>' : '<button type="button" id="exp-photo">📷 Adaugă poză</button>'}
       <button class="primary">Salvează</button>
     </div>
   </form>`;
@@ -432,7 +433,7 @@ function openExpense(exp, { runOcr = false } = {}) {
   openModal(isNew ? 'Bon nou' : 'Editează bon', html, (root) => {
     const form = $('#exp-form', root);
     const touched = new Set();
-    form.addEventListener('input', (ev) => touched.add(ev.target.name));
+    form.addEventListener('input', (ev) => { touched.add(ev.target.name); ev.target.classList.remove('check'); });
     const syncBlocks = () => {
       const c = catById(form.categoryId.value);
       $('#car-block', root).classList.toggle('hidden', !(c?.isCar || form.vehicleId.value));
@@ -448,38 +449,112 @@ function openExpense(exp, { runOcr = false } = {}) {
     form.liters.addEventListener('change', recalc);
     form.total.addEventListener('change', recalc);
 
-    const doOcr = async () => {
-      const st = $('#ocr-status', root);
+    // Bonurile lungi: fiecare poză e citită separat, textele se lipesc în ordine
+    // (magazin/dată/CUI din prima parte, totalul de obicei din ultima).
+    exp.extraImages = exp.extraImages || [];
+    const partTexts = exp.ocrText ? exp.ocrText.split(PART_SEP) : [];
+    const st = $('#ocr-status', root);
+    let pending = 0;
+
+    const renderPhotos = () => {
+      const photos = photosOf(exp);
+      const box = $('#exp-photos', root);
+      if (!photos.length) { box.innerHTML = ''; return; }
+      if (photos.length === 1) {
+        box.innerHTML = `<a href="${blobURL(photos[0])}" target="_blank" rel="noopener noreferrer"><img class="preview" src="${blobURL(photos[0])}" alt="bon"></a>`;
+      } else {
+        box.innerHTML = `<div class="parts">${photos.map((b, i) => `<div class="part">
+          <a href="${blobURL(b)}" target="_blank" rel="noopener noreferrer"><img src="${blobURL(b)}" alt="partea ${i + 1}"></a>
+          <span>${i + 1}/${photos.length}</span>
+          ${i > 0 ? `<button type="button" class="part-del" data-part="${i}" aria-label="Șterge partea ${i + 1}">✕</button>` : ''}
+        </div>`).join('')}</div>`;
+      }
+      const more = $('#exp-more', root);
+      if (more) more.disabled = photos.length >= MAX_PHOTOS;
+    };
+
+    const applyParse = () => {
+      const text = partTexts.filter(Boolean).join(PART_SEP);
+      form.ocrText.value = text;
+      const r = parseReceipt(text);
+      const set = (name, val) => { if (val != null && val !== '' && !touched.has(name)) form[name].value = val; };
+      set('date', r.date);
+      set('store', r.store);
+      set('total', r.total != null ? r.total.toFixed(2) : '');
+      if (r.suggestedCategoryKey && !touched.has('categoryId')) {
+        const c = state.categories.find((x) => x.key === r.suggestedCategoryKey);
+        if (c) form.categoryId.value = c.id;
+      }
+      if (r.fuel) {
+        set('liters', r.fuel.liters);
+        set('ppl', r.fuel.pricePerLiter);
+        set('fuelType', r.fuel.fuelType);
+      }
+      syncBlocks();
+      // OCR-ul poate greși anul (ex. 2026 citit 2020): semnalăm datele vechi ca să fie verificate
+      const old = form.date.value && (Date.now() - Date.parse(form.date.value)) / 864e5 > 60;
+      form.date.classList.toggle('check', !!old);
+      r.dateWarning = old ? ` ⚠️ Verifică data (${fmtDate(form.date.value)}) – pare veche.` : '';
+      return r;
+    };
+
+    const ocrPart = async (index, source) => {
+      const total = photosOf(exp).length;
+      pending++;
       st.classList.remove('hidden');
-      st.innerHTML = '🔍 Citesc bonul… <progress max="1" value="0"></progress>';
+      st.innerHTML = `🔍 Citesc ${total > 1 ? `partea ${index + 1} din ${total}` : 'bonul'}… <progress max="1" value="0"></progress>`;
       try {
-        const text = await recognize(exp.image, {
+        const text = await recognize(source, {
           onProgress: (status, p) => { const pr = $('progress', st); if (pr && status.includes('recogn')) pr.value = p; },
         });
         if (!form.isConnected) return;
-        form.ocrText.value = text;
-        const r = parseReceipt(text);
-        const set = (name, val) => { if (val != null && val !== '' && !touched.has(name)) form[name].value = val; };
-        set('date', r.date);
-        set('store', r.store);
-        set('total', r.total != null ? r.total.toFixed(2) : '');
-        if (r.suggestedCategoryKey && !touched.has('categoryId')) {
-          const c = state.categories.find((x) => x.key === r.suggestedCategoryKey);
-          if (c) form.categoryId.value = c.id;
+        partTexts[index] = text;
+        const r = applyParse();
+        if (--pending === 0) {
+          st.textContent = r.total != null
+            ? `✅ Bon citit${total > 1 ? ` (${total} poze)` : ''}. Verifică valorile și salvează.${r.dateWarning}${total === 1 ? ' Bon lung? Apasă „➕ Continuare bon”.' : ''}`
+            : '⚠️ Nu am găsit totalul. Dacă bonul e lung, apasă „➕ Continuare bon” și fotografiază partea de jos. Sfat: bonul întins, fără umbre, cât mai aproape.';
         }
-        if (r.fuel) {
-          set('liters', r.fuel.liters);
-          set('ppl', r.fuel.pricePerLiter);
-          set('fuelType', r.fuel.fuelType);
-        }
-        syncBlocks();
-        st.textContent = r.total != null ? '✅ Bon citit. Verifică valorile și salvează.' : '⚠️ Nu am găsit totalul. Completează manual.';
       } catch (err) {
+        pending--;
         st.textContent = '⚠️ ' + (err.message || 'Eroare OCR') + ' Completează manual.';
       }
     };
-    if (runOcr) doOcr();
+
+    const doOcr = async () => {
+      partTexts.length = 0;
+      const photos = photosOf(exp);
+      for (let i = 0; i < photos.length; i++) await ocrPart(i, i === 0 && ocrSource ? ocrSource : photos[i]);
+    };
+
+    renderPhotos();
+    if (runOcr) {
+      if (partTexts.length && exp.image) ocrPart(photosOf(exp).length - 1, ocrSource || exp.image);
+      else doOcr();
+    }
     $('#exp-ocr', root)?.addEventListener('click', doOcr);
+    $('#exp-more', root)?.addEventListener('click', async () => {
+      if (photosOf(exp).length >= MAX_PHOTOS) return toast(`Maxim ${MAX_PHOTOS} poze pe bon`);
+      toast('Fotografiază următoarea parte, puțin suprapusă cu cea de dinainte');
+      const f = await pickFile();
+      if (!f) return;
+      const img = await compressImage(f);
+      if (!img) return;
+      exp.extraImages.push(img);
+      renderPhotos();
+      ocrPart(photosOf(exp).length - 1, f);
+    });
+    $('#exp-photos', root).addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.part-del');
+      if (!btn) return;
+      ev.preventDefault();
+      const i = +btn.dataset.part;
+      if (!confirm(`Ștergi partea ${i + 1}?`)) return;
+      exp.extraImages.splice(i - 1, 1);
+      partTexts.splice(i, 1);
+      renderPhotos();
+      applyParse();
+    });
     $('#exp-photo', root)?.addEventListener('click', async () => {
       const f = await pickFile();
       if (!f) return;
@@ -487,7 +562,7 @@ function openExpense(exp, { runOcr = false } = {}) {
       if (!img) return;
       exp.image = img;
       Object.assign(exp, readExpenseForm(form, exp));
-      openExpense(exp, { runOcr: true });
+      openExpense(exp, { runOcr: true, ocrSource: f });
     });
     $('#exp-del', root)?.addEventListener('click', async () => { if (await remove('expenses', exp.id, 'bonul')) closeModal(); });
     form.addEventListener('submit', async (ev) => {
@@ -533,7 +608,7 @@ async function photoReceipt(capture = true) {
   if (!f) return;
   const image = await compressImage(f);
   if (!image) return;
-  openExpense(newExpense({ image }), { runOcr: true });
+  openExpense(newExpense({ image }), { runOcr: true, ocrSource: f });
 }
 
 // ---------- kilometraj ----------
@@ -843,7 +918,12 @@ async function exportJSON() {
   toast('Pregătesc backup-ul…');
   const out = { app: 'bonuri-masina', version: 1, exportedAt: new Date().toISOString() };
   for (const s of DATA_STORES) {
-    out[s] = await Promise.all(state[s].map(async (o) => (o.image instanceof Blob ? { ...o, image: await blobToDataURL(o.image) } : o)));
+    out[s] = await Promise.all(state[s].map(async (o) => {
+      const copy = { ...o };
+      if (o.image instanceof Blob) copy.image = await blobToDataURL(o.image);
+      if (Array.isArray(o.extraImages)) copy.extraImages = await Promise.all(o.extraImages.map(blobToDataURL));
+      return copy;
+    }));
   }
   let json = JSON.stringify(out);
   if (pw) json = JSON.stringify(await encryptText(json, pw));
@@ -877,9 +957,11 @@ async function importJSON() {
         for (const o of list) {
           if (!o || typeof o !== 'object') { skipped++; continue; }
           const img = o.image;
-          const clean = sanitize(s, { ...o, image: null });
+          const extras = Array.isArray(o.extraImages) ? o.extraImages : [];
+          const clean = sanitize(s, { ...o, image: null, extraImages: [] });
           if (!clean) { skipped++; continue; }
           if (safeImageDataURL(img)) clean.image = dataURLToBlob(img);
+          if (s === 'expenses') clean.extraImages = extras.filter(safeImageDataURL).slice(0, 9).map(dataURLToBlob);
           await db.put(s, clean);
           ok++;
         }
