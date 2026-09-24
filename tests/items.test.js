@@ -120,3 +120,9 @@ EY RON -129,00`;
 test('rândul de total citit greșit („MAL: RON”) nu devine produs', () => {
   assert.deepEqual(parseItems('HORNBACH CENTRALA SRL\nVISA DEBIT\nMAL: RON 1696,12\nPIN OK'), []);
 });
+
+test('scule electrice și de lucru ajung la „Scule & unelte”', () => {
+  for (const n of ['PROIECTOR LED 50W', 'Proiector cu senzor', 'COMPRESOR AER 50L', 'APARAT SUDURA INVERTOR', 'NIVELA LASER BOSCH', 'POLIZOR UNGHIULAR 125MM', 'MALAXOR 1600W'])
+    assert.equal(classifyItem(n), 'tools', n);
+  assert.equal(classifyItem('BEC LED E27'), 'electrical');
+});

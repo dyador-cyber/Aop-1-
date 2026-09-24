@@ -700,7 +700,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
         const r = applyParse();
         if (--pending === 0) {
           st.textContent = r.total != null
-            ? `✅ Bon citit${total > 1 ? ` (${total} poze)` : ''}. Verifică valorile și salvează.${r.dateWarning}${total === 1 ? ' Bon lung? Apasă „➕ Continuare bon”.' : ''}`
+            ? `✅ Bon citit${total > 1 ? ` (${total} poze)` : ''}. Verifică valorile și salvează.${r.dateWarning}${total === 1 ? ' Bon lung? Apasă „➕ Continuare bon”.' : ''}${exp.items.length ? '' : ' ℹ️ Nu am găsit produse pe bon (poate e chitanța de la card). Dacă vrei produsele în analize și în inventar, adaugă-le în „🧾 Produse” sau fotografiază bonul fiscal.'}`
             : '⚠️ Nu am găsit totalul. Dacă bonul e lung, apasă „➕ Continuare bon” și fotografiază partea de jos. Sfat: bonul întins, fără umbre, cât mai aproape.';
         }
       } catch (err) {
@@ -883,7 +883,7 @@ function renderInventory() {
   </section>
   ${Object.keys(groups).sort().map((loc) => `<section class="card"><h3>📍 ${esc(loc || 'Fără loc stabilit')} <span class="muted small">(${groups[loc].length})</span></h3>
     <ul class="list">${groups[loc].map(invRow).join('')}</ul></section>`).join('')
-    || `<p class="muted center">${state.inventory.length ? 'Nimic găsit.' : 'Inventarul e gol. Fotografiază bonuri cu scule sau adaugă manual sculele pe care le ai.'}</p>`}`;
+    || `<p class="muted center">${state.inventory.length ? 'Nimic găsit.' : 'Inventarul e gol. Sculele intră automat din <b>produsele</b> bonurilor (chitanța de la card nu are produse). Deschide bonul și adaugă produsul în „🧾 Produse”, sau apasă „+ Adaugă sculă” și alege bonul.'}</p>`}`;
 }
 
 function openInventory(x) {
@@ -915,6 +915,11 @@ function openInventory(x) {
     </div>
     <label>Subcategorie<select name="sub">${SUBCATS.map((c) => `<option value="${c.key}" ${c.key === x.sub ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
     <label>Notițe (serie, accesorii, baterii…)<textarea name="notes" rows="2">${esc(x.notes || '')}</textarea></label>
+    <label>Bonul de cumpărare (dovadă pentru garanție)<select name="expenseId">
+      <option value="">— fără bon —</option>
+      ${state.expenses.filter((e) => !e.isReturn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 150).map((e) =>
+        `<option value="${esc(e.id)}" ${e.id === x.expenseId ? 'selected' : ''}>${fmtDate(e.date)} · ${esc(e.store || '?')} · ${esc(money(e.total))}</option>`).join('')}
+    </select></label>
     ${exp ? `<p><button type="button" class="link" data-action="edit-expense" data-id="${esc(exp.id)}">🧾 Vezi bonul (${fmtDate(exp.date)} · ${esc(exp.store || '')} · ${money(exp.total)})</button></p>` : ''}
     ${(x.returns || []).length ? `<p class="muted small">↩️ Returnat ${x.returns.reduce((a, r) => a + r.qty, 0)} buc.</p>` : ''}
     <div class="actions">
@@ -936,6 +941,14 @@ function openInventory(x) {
     };
     form.name.addEventListener('change', dupCheck);
     if (isNew && x.name) dupCheck();
+    // alegerea bonului completează data, magazinul și garanția
+    form.expenseId.addEventListener('change', () => {
+      const e = state.expenses.find((i) => i.id === form.expenseId.value);
+      if (!e) return;
+      if (!form.purchaseDate.value) form.purchaseDate.value = e.date;
+      if (!form.store.value) form.store.value = e.store || '';
+      if (!form.warrantyUntil.value && e.date) form.warrantyUntil.value = addMonths(e.date, WARRANTY_MONTHS);
+    });
     form.purchaseDate.addEventListener('change', () => {
       if (!form.warrantyUntil.value && form.purchaseDate.value) form.warrantyUntil.value = addMonths(form.purchaseDate.value, WARRANTY_MONTHS);
     });
@@ -973,6 +986,8 @@ function readInv(form, x) {
     warrantyUntil: form.warrantyUntil.value,
     sub: form.sub.value,
     notes: form.notes.value.trim(),
+    expenseId: form.expenseId.value,
+    itemId: form.expenseId.value === x.expenseId ? x.itemId : '',
     edited: true,
     createdAt: x.createdAt || Date.now(),
   };
