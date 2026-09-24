@@ -38,6 +38,39 @@ const FUEL_WORDS = /\b(motorina|benzina|diesel|gpl|efix|maxx?motion|ultimate|eur
 
 const HEADER_NOISE = /\b(bon|ron)\s*(ne)?f[it]?[it]?scal|fiscal|nefiscal|bine ati venit|welcome/;
 
+// Magazine cunoscute: numele afișat (uniform, util la analize) și cuvântul după care îl recunoaștem
+const BRANDS = [
+  ['Hornbach', 'hornbach'], ['Dedeman', 'dedeman'], ['Leroy Merlin', 'leroy'], ['Brico Depot', 'bricodepot'], ['Brico Depot', 'brico depot'],
+  ['Praktiker', 'praktiker'], ['Mathaus', 'mathaus'], ['Arabesque', 'arabesque'], ['Kaufland', 'kaufland'], ['Lidl', 'lidl'],
+  ['Mega Image', 'mega image'], ['Carrefour', 'carrefour'], ['Auchan', 'auchan'], ['Profi', 'profi'], ['Penny', 'penny'],
+  ['Selgros', 'selgros'], ['Metro', 'metro cash'], ['Cora', 'cora'], ['OMV', 'omv'], ['Petrom', 'petrom'], ['Rompetrol', 'rompetrol'],
+  ['MOL', 'mol '], ['Lukoil', 'lukoil'], ['Socar', 'socar'], ['Catena', 'catena'], ['Dr. Max', 'dr max'], ['Sensiblu', 'sensiblu'],
+  ['Help Net', 'helpnet'], ['Dm', 'dm drogerie'], ['Ikea', 'ikea'], ['Jysk', 'jysk'], ['Altex', 'altex'], ['eMAG', 'emag'],
+  ['Flanco', 'flanco'], ['Autonet', 'autonet'], ['Norauto', 'norauto'],
+];
+
+// Recunoaște un magazin cunoscut și când OCR-ul greșește ultimele litere („HORNBACU”).
+export function findBrand(text) {
+  const n = ' ' + normalize(text).replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ') + ' ';
+  for (const [name, w] of BRANDS) if (n.includes(' ' + w.trim() + ' ') || (w.includes(' ') && n.includes(' ' + w))) return name;
+  const toks = n.trim().split(' ');
+  for (const [name, w] of BRANDS) {
+    if (w.includes(' ') || w.length < 7) continue;
+    const pre = w.slice(0, 6);
+    if (toks.some((t) => t.length >= w.length - 1 && t.length <= w.length + 1 && t.startsWith(pre))) return name;
+  }
+  return '';
+}
+
+// Bon de retur / stornare. Atenție: bonurile normale au în subsol „RETUR MARFĂ ÎN 90 ZILE”,
+// deci nu ajunge simplul cuvânt „retur”.
+export function isReturnText(text) {
+  const lines = String(text || '').split(/\r?\n/).map((l) => normalize(l).replace(/[^a-z0-9: ]+/g, ' ').trim());
+  return lines.some((l) => /^(bon (de )?)?(retur|storno|stornare|restituire|refund)$/.test(l.replace(/\s+/g, ' '))
+    || /\bmotiv\s*:?\s*retur/.test(l) || /\bstorn(o|are|at)\b/.test(l) || /\b(bon|nota) (de )?retur\b/.test(l) || /\brefund\b/.test(l)
+    || /^\W*x*\s*retur\b(?! marfa)/.test(l));
+}
+
 const STORE_HINTS = [
   { key: 'fuel', words: ['omv', 'petrom', 'rompetrol', 'mol ', 'lukoil', 'socar', 'gazprom', 'benzinaria'] },
   { key: 'house_materials', words: ['dedeman', 'leroy', 'hornbach', 'brico', 'arabesque', 'materiale de constructii', 'praktiker', 'mathaus', 'ciment', 'adeziv', 'bca', 'caramida'] },
@@ -50,7 +83,7 @@ export function parseReceipt(text, today = new Date()) {
   const raw = String(text || '');
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const norm = normalize(raw);
-  const result = { store: '', date: '', total: null, cif: '', fuel: null, suggestedCategoryKey: null };
+  const result = { store: '', date: '', total: null, cif: '', fuel: null, suggestedCategoryKey: null, isReturn: false };
 
   // Magazin: linia cu SRL/SA sau un magazin cunoscut; altfel prima linie „curată” din antet
   const letters = (l) => (l.match(/[A-Za-zĂÂÎȘȚăâîșț]/g) || []).length;
@@ -59,7 +92,9 @@ export function parseReceipt(text, today = new Date()) {
   const storeLine = head.find((l) => /\b(s\.?\s?r\.?\s?l|s\.?\s?a)\b\.?/i.test(l) && !isNoise(l))
     || head.find((l) => STORE_HINTS.some((h) => h.words.some((w) => normalize(l).includes(w.trim()))))
     || head.find((l) => !isNoise(l));
-  if (storeLine) result.store = storeLine.replace(/\s{2,}/g, ' ').trim().slice(0, 60);
+  const brand = findBrand(lines.slice(0, 15).join('\n'));
+  if (brand) result.store = brand;
+  else if (storeLine) result.store = storeLine.replace(/\s{2,}/g, ' ').trim().slice(0, 60);
 
   // CIF
   // „CUI”/„CIF” (OCR citește uneori „I” ca „l”/„1”), cifre posibil despărțite de spații
@@ -84,6 +119,7 @@ export function parseReceipt(text, today = new Date()) {
 
   // Total: linia cu „TOTAL” (nu SUBTOTAL / TOTAL TVA)
   let total = null;
+  let negative = false;
   for (let i = 0; i < lines.length; i++) {
     const n = normalize(lines[i]);
     // „TOTAL” poate fi citit greșit de OCR ca „ITAL”, „T0TAL”, „OTAL” la început de rând
@@ -91,13 +127,30 @@ export function parseReceipt(text, today = new Date()) {
     if (!isTotal || /subtotal|total\s*tva|tva\s*total|total\s*taxe/.test(n)) continue;
     let nums = amountsIn(lines[i].replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3'));
     if (!nums.length && lines[i + 1]) nums = amountsIn(lines[i + 1]);
-    if (nums.length) { total = nums[nums.length - 1]; break; }
+    if (nums.length) {
+      total = nums[nums.length - 1];
+      negative = /-\s*\d[\d .]*[.,]\s?\d{2}\s*\S?\s*$/.test(lines[i]) || (!amountsIn(lines[i]).length && /-\s*\d/.test(lines[i + 1] || ''));
+      break;
+    }
+  }
+  // Verificare: dacă totalul apare o singură dată pe bon, dar o sumă care diferă printr-o singură
+  // cifră apare de mai multe ori (ex. „-128,00” citit greșit, „129,00” de 4 ori), o alegem pe aceea.
+  if (total != null) {
+    const freq = new Map();
+    for (const a of lines.flatMap((l) => amountsIn(l.replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3')))) freq.set(a.toFixed(2), (freq.get(a.toFixed(2)) || 0) + 1);
+    const t = total.toFixed(2);
+    if ((freq.get(t) || 0) <= 1) {
+      const oneOff = (a, b) => a.length === b.length && [...a].filter((c, k) => c !== b[k]).length === 1;
+      const alt = [...freq].filter(([a, c]) => c >= 2 && oneOff(a, t)).sort((x, y) => y[1] - x[1])[0];
+      if (alt) total = +alt[0];
+    }
   }
   if (total == null) {
     const all = lines.filter((l) => !/\d{1,2}[./-]\d{1,2}[./-]20\d{2}/.test(l)).flatMap(amountsIn);
     if (all.length) total = Math.max(...all);
   }
-  result.total = total;
+  result.isReturn = negative || isReturnText(raw);
+  result.total = total != null && result.isReturn ? -Math.abs(total) : total;
 
   // Combustibil
   if (FUEL_WORDS.test(norm) || /\blitri\b/.test(norm)) {
@@ -120,8 +173,9 @@ export function parseReceipt(text, today = new Date()) {
   }
 
   if (!result.suggestedCategoryKey) {
+    const hay = norm + ' ' + normalize(brand) + ' ';
     for (const h of STORE_HINTS) {
-      if (h.words.some((w) => norm.includes(w))) { result.suggestedCategoryKey = h.key; break; }
+      if (h.words.some((w) => hay.includes(w))) { result.suggestedCategoryKey = h.key; break; }
     }
   }
   return result;
@@ -143,7 +197,8 @@ const SUFFIXES = ['urilor', 'ului', 'elor', 'ilor', 'iile', 'esc', 'ele', 'ile',
 export function stem(word) {
   const w = normalize(word).replace(/[^a-z0-9]/g, '');
   for (const s of SUFFIXES) {
-    if (w.endsWith(s) && w.length - s.length >= 3) return w.slice(0, -s.length);
+    // sufixele lungi („-uri”, „-ele”) doar dacă rămâne o rădăcină de minim 4 litere („mături” → „matur”, nu „mat”)
+    if (w.endsWith(s) && w.length - s.length >= (s.length >= 3 ? 4 : 3)) return w.slice(0, -s.length);
   }
   return w;
 }
@@ -237,19 +292,48 @@ export function runQuery(text, ctx, today = new Date()) {
   if (q.fuel) list = list.filter((e) => isFuelExpense(e, ctx));
 
   const matchedTerms = [];
+  const itemTerms = [];
   const unmatched = [];
+  // cuvintele din numele produsului + numele subcategoriei lui („Băuturi”, „Scule & unelte”)
+  const itemStems = (i) => {
+    const sc = (ctx.subcats || []).find((x) => x.key === i.sub);
+    return normalize(`${i.name} ${sc?.name || ''}`).split(/[^a-z0-9]+/).filter((w) => w.length >= 2).map(stem);
+  };
+  const hitsItem = (i, term) => itemStems(i).some((s) => stemsMatch(s, term.stem));
   for (const term of q.terms) {
     const anyHit = ctx.expenses.some((e) => expenseStems(e, ctx).some((s) => stemsMatch(s, term.stem)))
       || [...ctx.categories, ...ctx.projects, ...ctx.vehicles].some((o) =>
         normalize(`${o.name} ${o.plate || ''}`).split(/[^a-z0-9]+/).some((w) => w.length >= 3 && stemsMatch(stem(w), term.stem)));
-    if (anyHit) matchedTerms.push(term); else unmatched.push(term.word);
+    if (anyHit) matchedTerms.push(term);
+    else if (ctx.expenses.some((e) => (e.items || []).some((i) => hitsItem(i, term)))
+      || (ctx.subcats || []).some((sc) => normalize(sc.name).split(/[^a-z0-9]+/).some((w) => w.length >= 3 && stemsMatch(stem(w), term.stem)))) itemTerms.push(term);
+    else unmatched.push(term.word);
   }
   for (const term of matchedTerms) {
     list = list.filter((e) => expenseStems(e, ctx).some((s) => stemsMatch(s, term.stem)));
   }
 
-  const noMatch = q.terms.length > 0 && matchedTerms.length === 0 && !q.fuel && !q.km;
+  const noMatch = q.terms.length > 0 && matchedTerms.length === 0 && itemTerms.length === 0 && !q.fuel && !q.km;
   if (noMatch) list = [];
+
+  // Întrebare despre produse („unt”, „băuturi luna asta”): adunăm doar produsele potrivite, nu bonul întreg.
+  if (itemTerms.length) {
+    const items = list.flatMap((e) => (e.items || []).map((i) => ({ ...i, e })))
+      .filter((i) => itemTerms.every((t) => hitsItem(i, t)))
+      .sort((a, b) => (b.e.date || '').localeCompare(a.e.date || ''));
+    const bySub = {};
+    for (const i of items) {
+      const n = (ctx.subcats || []).find((x) => x.key === i.sub)?.name || 'Altele';
+      bySub[n] = (bySub[n] || 0) + (+i.amount || 0);
+    }
+    const expenses = [...new Set(items.map((i) => i.e))];
+    return {
+      query: q, label: q.range.label, expenses, items,
+      total: +items.reduce((a, i) => a + (+i.amount || 0), 0).toFixed(2),
+      liters: 0, byCategory: bySub, byProject: {}, kmInfo: null,
+      matchedTerms: [...matchedTerms, ...itemTerms].map((t) => t.word), unmatched, noMatch: false,
+    };
+  }
 
   const total = list.reduce((s, e) => s + (+e.total || 0), 0);
   const liters = list.reduce((s, e) => s + (+e.fuel?.liters || 0), 0);
