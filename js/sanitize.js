@@ -6,6 +6,7 @@ const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 import { SUBCAT_KEYS } from './items.js';
+import { INV_STATUS_KEYS } from './inventory.js';
 
 export const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
@@ -57,6 +58,17 @@ const SCHEMAS = {
     id: id(o.id), key: str(o.key, 30), name: str(o.name, 80), color: COLOR_RE.test(o.color) ? o.color : '#607d8b',
     isCar: bool(o.isCar), isFuel: bool(o.isFuel), order: numOrNull(o.order, 0, 1e6),
   }),
+  inventory: (o) => ({
+    id: id(o.id), name: str(o.name, 100).trim(), qty: Math.round(numOrNull(o.qty, 0, 1e4) ?? 1), price: numOrNull(o.price, 0, 1e8),
+    purchaseDate: date(o.purchaseDate), store: str(o.store, 80), expenseId: id(o.expenseId), itemId: id(o.itemId),
+    sub: SUBCAT_KEYS.has(o.sub) ? o.sub : 'tools', location: str(o.location, 60).trim(),
+    status: INV_STATUS_KEYS.has(o.status) ? o.status : 'avail', lentTo: str(o.lentTo, 80).trim(), lentDate: date(o.lentDate),
+    warrantyUntil: date(o.warrantyUntil), notes: str(o.notes, 1000), image: image(o.image), auto: bool(o.auto), edited: bool(o.edited),
+    returns: (Array.isArray(o.returns) ? o.returns : []).slice(0, 50)
+      .map((r) => ({ expenseId: id(r?.expenseId), itemId: id(r?.itemId), qty: Math.round(numOrNull(r?.qty, 1, 1e4) ?? 1) }))
+      .filter((r) => r.expenseId && r.itemId),
+    createdAt: time(o.createdAt),
+  }),
   projects: (o) => ({ id: id(o.id), name: str(o.name, 80), budget: numOrNull(o.budget, 0, 1e12), notes: str(o.notes, 2000) }),
 };
 
@@ -68,7 +80,7 @@ export function sanitize(store, obj) {
   if (store === 'reminders' && !clean.dueDate) return null;
   if (store === 'expenses' && !clean.date) return null;
   if (store === 'odometer' && (!clean.date || clean.km === null)) return null;
-  if ((store === 'categories' || store === 'projects' || store === 'vehicles') && !clean.name) return null;
+  if ((store === 'categories' || store === 'projects' || store === 'vehicles' || store === 'inventory') && !clean.name) return null;
   return clean;
 }
 
@@ -97,4 +109,10 @@ export function sanitizeRules(obj) {
     if (typeof k === 'string' && k.length <= 60 && /^[a-z0-9 ]+$/.test(k) && SUBCAT_KEYS.has(v)) out[k] = v;
   }
   return out;
+}
+
+// Ce subcategorii intră automat în inventar (implicit doar sculele).
+export function sanitizeInvSubs(v) {
+  const list = (Array.isArray(v) ? v : []).filter((k) => SUBCAT_KEYS.has(k));
+  return list.length ? [...new Set(list)].slice(0, 20) : ['tools'];
 }
