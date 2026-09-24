@@ -167,3 +167,19 @@ test('total cu spațiu după virgulă și fără a confunda data cu suma', () =>
   assert.equal(r.total, 1636.12);
   assert.equal(parseReceipt('MAGAZIN X SRL\n23.09.2026 12.38').total, null);
 });
+
+test('data: ignoră cifre greșite de OCR și date din viitor', () => {
+  const today = new Date(2026, 8, 24);
+  assert.equal(parseReceipt('X SRL\nWI 23/09/2026 12:38\n= 23.09.2020 12:38:40', today).date, '2026-09-23');
+  assert.equal(parseReceipt('X SRL\n23.09.2026\n23.09.2020\n23.09.2020', today).date, '2020-09-23');
+  assert.equal(parseReceipt('X SRL\n23.09.2029 12:00\n23.09.2026', today).date, '2026-09-23');
+});
+
+test('bon lung din mai multe poze: magazin sus, total jos', () => {
+  const part1 = 'BON NEFISCAL\nHORNBACH CENTRALA SRL\nCUI: RO17777320\n23/9/2026 12:38\nCIMENT 40KG';
+  const part2 = 'ADEZIV 89,90\nTAL: RON 1696,12\n23.09.2026 12:34';
+  const r = parseReceipt(part1 + '\n--- continuare bon ---\n' + part2, new Date(2026, 8, 24));
+  assert.equal(r.store, 'HORNBACH CENTRALA SRL');
+  assert.equal(r.total, 1696.12);
+  assert.equal(r.date, '2026-09-23');
+});

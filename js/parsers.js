@@ -46,7 +46,7 @@ const STORE_HINTS = [
   { key: 'food', words: ['kaufland', 'lidl', 'mega image', 'carrefour', 'auchan', 'profi', 'penny', 'cora', 'selgros', 'metro', 'la doi pasi', 'annabella'] },
 ];
 
-export function parseReceipt(text) {
+export function parseReceipt(text, today = new Date()) {
   const raw = String(text || '');
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const norm = normalize(raw);
@@ -67,14 +67,20 @@ export function parseReceipt(text) {
   if (cif) result.cif = (cif[1] ? 'RO' : '') + cif[2].replace(/\s/g, '');
 
   // Data
-  const d1 = [...raw.matchAll(/(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](20\d{2})(?!\d)/g)]
-    .find((m) => +m[2] >= 1 && +m[2] <= 12 && +m[1] >= 1 && +m[1] <= 31);
-  const d2 = raw.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
-  if (d1) {
-    result.date = `${d1[3]}-${d1[2].padStart(2, '0')}-${d1[1].padStart(2, '0')}`;
-  } else if (d2) {
-    result.date = `${d2[1]}-${d2[2]}-${d2[3]}`;
-  }
+  // Data: bonurile o conțin adesea de mai multe ori, iar OCR-ul poate greși o cifră pe un rând.
+  // Adunăm toate datele valide, eliminăm datele din viitor și alegem pe cea mai frecventă
+  // (la egalitate, pe cea mai recentă).
+  const maxDate = iso(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1));
+  const counts = new Map();
+  const add = (y, m, d) => {
+    if (+m < 1 || +m > 12 || +d < 1 || +d > 31) return;
+    const v = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    if (v <= maxDate) counts.set(v, (counts.get(v) || 0) + 1);
+  };
+  for (const m of raw.matchAll(/(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](20\d{2})(?!\d)/g)) add(m[3], m[2], m[1]);
+  for (const m of raw.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g)) add(m[1], m[2], m[3]);
+  const bestDate = [...counts].sort((a, b) => b[1] - a[1] || b[0].localeCompare(a[0]))[0];
+  if (bestDate) result.date = bestDate[0];
 
   // Total: linia cu „TOTAL” (nu SUBTOTAL / TOTAL TVA)
   let total = null;

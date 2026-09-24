@@ -34,6 +34,8 @@ npm test         # testele pentru citirea bonurilor, întrebări și notificări
 - Pe iPhone notificările web funcționează doar cu aplicația adăugată pe ecranul principal (iOS 16.4+). Pentru siguranță, apasă **„📆 Adaugă toate în calendarul telefonului”**: evenimentele au alarme proprii și sună chiar dacă aplicația nu e deschisă.
 
 ## OCR
+**Bonuri lungi:** fotografiază partea de sus, apoi apasă **„➕ Continuare bon”** pentru fiecare bucată următoare (puțin suprapuse, de sus în jos, maxim 10 poze). Aplicația citește fiecare poză, lipește textele în ordine și ia magazinul, data și CUI-ul de sus și totalul de jos. Toate pozele rămân la același bon.
+
 Recunoașterea textului rulează direct pe telefon cu [Tesseract.js](https://github.com/naptha/tesseract.js) (română + engleză), inclus în aplicație (`vendor/tesseract`). La prima folosire se descarcă ~10 MB de date de limbă, păstrate apoi în cache. Pentru rezultate bune: bonul întins, lumină bună, poza cât mai dreaptă. Verifică valorile înainte de salvare. Tot ce completezi tu nu este suprascris de OCR.
 
 ## Integrare cu alte programe
@@ -49,6 +51,7 @@ js/app.js             ecrane, formulare, export, notificări
 js/parsers.js         citirea bonurilor / kilometrajului, interpretarea întrebărilor
 js/reminder-core.js   calculul notificărilor (folosit și de service worker)
 js/db.js              baza de date locală (IndexedDB)
+js/preprocess.js      decuparea bonului și eliminarea umbrelor înainte de OCR
 js/sanitize.js        validarea datelor, protecții CSV/ICS
 js/crypto.js          criptarea backup-urilor
 vendor/tesseract/     motorul OCR inclus local
