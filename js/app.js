@@ -19,6 +19,8 @@ const DEFAULT_CATEGORIES = [
   { key: 'health', name: 'Sănătate', color: '#c62828' },
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
+// Afișată în Setări: arată dacă telefonul a luat ultima actualizare.
+const APP_VERSION = '2026.09.24-7';
 const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
 
@@ -488,7 +490,7 @@ function renderSettings() {
       <button data-action="import-json">⬆️ Restaurare backup</button>
     </div></section>
   <section class="card"><h3>Zonă periculoasă</h3><button class="danger" data-action="wipe">Șterge toate datele</button></section>
-  <p class="muted small center">Bonuri & Mașină · datele sunt salvate doar pe acest dispozitiv.</p>`;
+  <p class="muted small center">Bonuri & Mașină · versiunea ${APP_VERSION} · datele sunt salvate doar pe acest dispozitiv.</p>`;
 }
 
 // ---------- formular bon ----------
