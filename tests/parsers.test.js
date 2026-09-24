@@ -135,3 +135,35 @@ test('notificări expirări', () => {
   assert.deepEqual([...due.map((d) => d.key)], ['2026-09-30:7', '2026-09-20:expirat']);
   assert.match(due[0].body, /6 zile/);
 });
+
+// Text OCR real (bon Hornbach fotografiat în mașină, cu umbre), fără liniile cu date de card.
+test('bon real Hornbach (OCR cu zgomot)', () => {
+  const text = `BON NEF TSCAL
+"Ny a
+HORNBACH CENTRALA SRL
+SOSLAUA ANDRONACHE , 24b “297
+S{CINDR 2 BUCURE ST I
+MUNICIPIUL BUCUREŞTI
+cul: RO177 77320
+M 23/9/2026 12:38 x 0121
+i 9 tt ++
+23.09. 20 12:38:40 i
+VISA CONTACTLESS
+ALE
+TAL: RON 1696,12
+--- PIN OK ---
+E 73.09.2026 12:34 0024 242424 oon
+BON NEF ISCA`;
+  const r = parseReceipt(text);
+  assert.equal(r.store, 'HORNBACH CENTRALA SRL');
+  assert.equal(r.date, '2026-09-23');
+  assert.equal(r.total, 1696.12);
+  assert.equal(r.cif, 'RO17777320');
+  assert.equal(r.suggestedCategoryKey, 'house_materials');
+});
+
+test('total cu spațiu după virgulă și fără a confunda data cu suma', () => {
+  const r = parseReceipt('MAGAZIN X SRL\n23.09.2026 12:38:40\nTAL: RON 1636, 12');
+  assert.equal(r.total, 1636.12);
+  assert.equal(parseReceipt('MAGAZIN X SRL\n23.09.2026 12.38').total, null);
+});

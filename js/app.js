@@ -394,7 +394,7 @@ function renderSettings() {
 }
 
 // ---------- formular bon ----------
-function openExpense(exp, { runOcr = false } = {}) {
+function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
   const isNew = !state.expenses.some((e) => e.id === exp.id);
   const cat = catById(exp.categoryId);
   const html = `
@@ -453,7 +453,7 @@ function openExpense(exp, { runOcr = false } = {}) {
       st.classList.remove('hidden');
       st.innerHTML = '🔍 Citesc bonul… <progress max="1" value="0"></progress>';
       try {
-        const text = await recognize(exp.image, {
+        const text = await recognize(ocrSource || exp.image, {
           onProgress: (status, p) => { const pr = $('progress', st); if (pr && status.includes('recogn')) pr.value = p; },
         });
         if (!form.isConnected) return;
@@ -473,7 +473,8 @@ function openExpense(exp, { runOcr = false } = {}) {
           set('fuelType', r.fuel.fuelType);
         }
         syncBlocks();
-        st.textContent = r.total != null ? '✅ Bon citit. Verifică valorile și salvează.' : '⚠️ Nu am găsit totalul. Completează manual.';
+        st.textContent = r.total != null ? '✅ Bon citit. Verifică valorile și salvează.'
+          : '⚠️ Nu am găsit totalul. Completează manual. Sfat: bonul întins, pe o suprafață închisă la culoare, fără umbre, cât mai aproape.';
       } catch (err) {
         st.textContent = '⚠️ ' + (err.message || 'Eroare OCR') + ' Completează manual.';
       }
@@ -487,7 +488,7 @@ function openExpense(exp, { runOcr = false } = {}) {
       if (!img) return;
       exp.image = img;
       Object.assign(exp, readExpenseForm(form, exp));
-      openExpense(exp, { runOcr: true });
+      openExpense(exp, { runOcr: true, ocrSource: f });
     });
     $('#exp-del', root)?.addEventListener('click', async () => { if (await remove('expenses', exp.id, 'bonul')) closeModal(); });
     form.addEventListener('submit', async (ev) => {
@@ -533,7 +534,7 @@ async function photoReceipt(capture = true) {
   if (!f) return;
   const image = await compressImage(f);
   if (!image) return;
-  openExpense(newExpense({ image }), { runOcr: true });
+  openExpense(newExpense({ image }), { runOcr: true, ocrSource: f });
 }
 
 // ---------- kilometraj ----------

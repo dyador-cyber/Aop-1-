@@ -1,6 +1,8 @@
 // OCR în browser cu Tesseract.js. Tot codul (JS + WebAssembly) este inclus în aplicație
 // (vendor/tesseract), deci nu se execută cod descărcat de pe alte servere.
 // Singurul lucru descărcat la prima folosire sunt datele de limbă (ron/eng, doar date, nu cod).
+import { binarize, findPaper, crop } from './preprocess.js';
+
 const BASE = new URL('../vendor/tesseract/', import.meta.url).href;
 
 let loading;
@@ -33,8 +35,32 @@ async function getWorker(kind, onProgress) {
   }
   const w = await workers[kind];
   workers[kind].progress = onProgress;
-  if (kind === 'digits') await w.setParameters({ tessedit_char_whitelist: '0123456789 ' });
+  // bonuri: text pe un singur bloc (psm 6) dă cele mai bune rezultate pe poze reale
+  await w.setParameters(kind === 'digits' ? { tessedit_char_whitelist: '0123456789 ' } : { tessedit_pageseg_mode: '6' });
   return w;
+}
+
+// Pregătește poza bonului: rezoluție mare, decupează hârtia (scoate fundalul), elimină umbrele.
+async function prepareReceipt(blob, maxSide = 2400) {
+  const bmp = await createImageBitmap(blob);
+  const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+  const W = Math.max(1, Math.round(bmp.width * scale));
+  const H = Math.max(1, Math.round(bmp.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0, W, H);
+  bmp.close?.();
+  const { data } = ctx.getImageData(0, 0, W, H);
+  const box = findPaper(data, W, H) || { x: 0, y: 0, w: W, h: H };
+  const bin = binarize(box.w === W && box.h === H ? data : crop(data, W, box), box.w, box.h, { windowFrac: 1 / 16, t: 0.15 });
+  canvas.width = box.w;
+  canvas.height = box.h;
+  ctx.putImageData(new ImageData(bin, box.w, box.h), 0, 0);
+  const out = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  canvas.width = canvas.height = 1; // eliberează memoria
+  return out || blob;
 }
 
 // Returnează textul recunoscut din imagine (Blob).
@@ -42,7 +68,12 @@ export async function recognize(blob, { digits = false, onProgress } = {}) {
   const worker = await getWorker(digits ? 'digits' : 'text', (m) => {
     if (onProgress && m.status) onProgress(m.status, m.progress || 0);
   });
-  const { data } = await worker.recognize(blob);
+  let input = blob;
+  if (!digits) {
+    onProgress?.('pregătesc poza', 0);
+    input = await prepareReceipt(blob).catch(() => blob);
+  }
+  const { data } = await worker.recognize(input);
   return (data.text || '').slice(0, 20000);
 }
 
