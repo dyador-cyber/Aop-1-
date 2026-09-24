@@ -90,3 +90,13 @@ test('„ai deja”: aceeași unealtă, altă marcă', () => {
   assert.deepEqual(findSimilar('bormasina makita', inv).map((x) => x.id), ['a']);
   assert.deepEqual(findSimilar('fierastrau pendular', inv), []);
 });
+
+test('retur cu nume citit foarte diferit: prețul identic și bonul original decid', () => {
+  let inv = apply([], syncFromExpense({ id: 'p9', date: '2026-09-23', store: 'Hornbach', items: [
+    { id: 'a', name: 'JGERT CLEŞTEPINI', qty: 1, unitPrice: 129, amount: 129, sub: 'tools' },
+    { id: 'b', name: 'PROIECTOR 30W', qty: 2, unitPrice: 94.9, amount: 189.8, sub: 'tools' }] }, [], { uid }));
+  const out = syncFromExpense({ id: 'r9', date: '2026-09-23', store: 'Hornbach', isReturn: true, returnOf: 'p9',
+    items: [{ id: 'k', name: 'HGERT CLESTE PINI', qty: 1, unitPrice: 129, amount: -129, sub: 'tools' }] }, inv, { uid });
+  assert.deepEqual(out.returned.map((x) => x.itemId), ['a']);
+  assert.deepEqual(out.unmatched, []);
+});

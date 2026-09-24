@@ -126,3 +126,32 @@ test('scule electrice și de lucru ajung la „Scule & unelte”', () => {
     assert.equal(classifyItem(n), 'tools', n);
   assert.equal(classifyItem('BEC LED E27'), 'electrical');
 });
+
+test('bon fiscal real Hornbach fotografiat în 3 părți suprapuse (text OCR cu zgomot)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const text = readFileSync(new URL('./fixtures/hornbach-bon-fiscal-3-poze.txt', import.meta.url), 'utf8');
+  const r = parseReceipt(text, new Date(2026, 8, 24));
+  assert.equal(r.store, 'Hornbach');
+  assert.equal(r.total, 1696.12);
+  assert.equal(r.isReturn, false);
+  const items = parseItems(text);
+  assert.equal(items.length, 18, 'POZIȚII: 18 – fără dubluri din zonele suprapuse');
+  assert.equal(+items.reduce((a, i) => a + i.amount, 0).toFixed(2), 1696.12, 'suma produselor = totalul bonului');
+  const tools = items.filter((i) => classifyItem(i.name) === 'tools').map((i) => [i.amount, i.qty]);
+  assert.deepEqual(tools, [[189.8, 2], [129, 1], [655, 1]], 'cele două proiectoare și cleștele');
+  assert.ok(items.filter((i) => classifyItem(i.name) === 'electrical').length >= 12);
+});
+
+test('dimensiunile din nume nu sunt cantități', () => {
+  const items = parseItems('1 BUC. x 17,90 LEI\nSCAME DOZĂ 95X95MM 17,90 A\nCM: ART/EAN 8001636210193\n1 BUC. x 655,00 LEI\nLP PROIE. STV. 2X50W 655,00 A\nSUBTOTAL LEI 672,90');
+  assert.deepEqual(items.map((i) => [i.name, i.qty, i.amount]), [['SCAME DOZĂ 95X95MM', 1, 17.9], ['LP PROIE. STV. 2X50W', 1, 655]]);
+  assert.equal(classifyItem('LP PROIE. STV. 2X50W'), 'tools');
+  assert.equal(classifyItem('NYM-J 3X1,5 MM INEL'), 'electrical');
+});
+
+test('aceeași poziție citită diferit în două poze (189,80 / 183,80) nu se dublează', () => {
+  const p1 = '2 BUC. x 94,90 LEI\nFS oD PROIECTOR 30M 189,80 A\nCM: ART/EAN 4306517910495\n2 BUC. x 15,70 LEI\nCOLIERE400X4,8MM ALB 31,40 A';
+  const p2 = '- BUC. x 94,90 LEI\nPROIECTOR 30W 183,80 A\nCM: ART/EAN 4306517910495\n2 BUC. x 15,70 LEI\nCOLIERE400X4,8MM ALB 31,40 A\nWAGO COMPACT CLEMA 35,50 A';
+  const items = parseItems(p1 + '\n--- continuare bon ---\n' + p2);
+  assert.deepEqual(items.map((i) => [i.name, i.amount, i.qty]), [['PROIECTOR 30W', 189.8, 2], ['COLIERE400X4,8MM ALB', 31.4, 2], ['WAGO COMPACT CLEMA', 35.5, null]]);
+});
