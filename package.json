@@ -1,0 +1,11 @@
+{
+  "name": "bonuri-masina",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PWA pentru bonuri, costuri casă/mașină, kilometraj, expirări și liste",
+  "type": "module",
+  "scripts": {
+    "start": "npx --yes http-server -c-1 -p 8080 .",
+    "test": "node --test tests/*.test.js"
+  }
+}
