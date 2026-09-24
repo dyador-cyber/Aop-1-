@@ -49,15 +49,47 @@ const BRANDS = [
   ['Flanco', 'flanco'], ['Autonet', 'autonet'], ['Norauto', 'norauto'],
 ];
 
-// Recunoaște un magazin cunoscut și când OCR-ul greșește ultimele litere („HORNBACU”).
+export function levenshtein(a, b) {
+  if (a === b) return 0;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// Coduri fiscale (CUI) ale unor magazine mari: pe bon, CUI-ul e adesea mai lizibil decât numele.
+const KNOWN_CUI = { '17777320': 'Hornbach', '2816464': 'Dedeman', '15991149': 'Kaufland', '22891860': 'Lidl' };
+
+// Magazinul după CUI: întâi regulile învățate din corecturile tale, apoi lista de mai sus.
+// Tolerează o cifră citită greșit („RO1777 7320”, „ROV7777320”).
+export function brandFromCif(text, learned = {}) {
+  const t = String(text || '');
+  // și varianta cu un singur spațiu eliminat între cifre („RO1777 7320”), dar nu peste rânduri
+  const runs = [...new Set([...t.matchAll(/\d{6,10}/g), ...t.replace(/(\d) (?=\d)/g, '$1').matchAll(/\d{6,10}/g)].map((m) => m[0]))];
+  const table = { ...KNOWN_CUI, ...Object.fromEntries(Object.entries(learned).map(([k, v]) => [k.replace(/\D/g, ''), v])) };
+  for (const exact of [true, false]) {
+    for (const r of runs) {
+      for (const [cui, name] of Object.entries(table)) {
+        if (cui.length < 6) continue;
+        if (exact ? r === cui : cui.length >= 7 && Math.abs(r.length - cui.length) <= 1 && levenshtein(r, cui) === 1) return name;
+      }
+    }
+  }
+  return '';
+}
+
+// Recunoaște un magazin cunoscut și când OCR-ul greșește 1–2 litere („HORNBACU”, „ORBACH”, „H0RNBACH”).
 export function findBrand(text) {
   const n = ' ' + normalize(text).replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ') + ' ';
   for (const [name, w] of BRANDS) if (n.includes(' ' + w.trim() + ' ') || (w.includes(' ') && n.includes(' ' + w))) return name;
-  const toks = n.trim().split(' ');
+  const toks = n.trim().split(' ').map((t) => t.replace(/0/g, 'o').replace(/1/g, 'i'));
   for (const [name, w] of BRANDS) {
-    if (w.includes(' ') || w.length < 7) continue;
-    const pre = w.slice(0, 6);
-    if (toks.some((t) => t.length >= w.length - 1 && t.length <= w.length + 1 && t.startsWith(pre))) return name;
+    if (w.includes(' ') || w.length < 6) continue;
+    const max = w.length >= 8 ? 2 : 1;
+    if (toks.some((t) => Math.abs(t.length - w.length) <= max && levenshtein(t, w) <= max)) return name;
   }
   return '';
 }
@@ -79,7 +111,7 @@ const STORE_HINTS = [
   { key: 'food', words: ['kaufland', 'lidl', 'mega image', 'carrefour', 'auchan', 'profi', 'penny', 'cora', 'selgros', 'metro', 'la doi pasi', 'annabella'] },
 ];
 
-export function parseReceipt(text, today = new Date()) {
+export function parseReceipt(text, today = new Date(), { storeRules = {} } = {}) {
   const raw = String(text || '');
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const norm = normalize(raw);
@@ -92,7 +124,8 @@ export function parseReceipt(text, today = new Date()) {
   const storeLine = head.find((l) => /\b(s\.?\s?r\.?\s?l|s\.?\s?a)\b\.?/i.test(l) && !isNoise(l))
     || head.find((l) => STORE_HINTS.some((h) => h.words.some((w) => normalize(l).includes(w.trim()))))
     || head.find((l) => !isNoise(l));
-  const brand = findBrand(lines.slice(0, 15).join('\n'));
+  // magazinul: regula învățată / CUI cunoscut > nume recunoscut > primul rând „curat”
+  const brand = brandFromCif(lines.slice(0, 20).join('\n'), storeRules) || findBrand(lines.slice(0, 15).join('\n'));
   if (brand) result.store = brand;
   else if (storeLine) result.store = storeLine.replace(/\s{2,}/g, ' ').trim().slice(0, 60);
 

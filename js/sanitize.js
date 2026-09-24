@@ -116,3 +116,13 @@ export function sanitizeInvSubs(v) {
   const list = (Array.isArray(v) ? v : []).filter((k) => SUBCAT_KEYS.has(k));
   return list.length ? [...new Set(list)].slice(0, 20) : ['tools'];
 }
+
+// Magazine învățate după CUI: { „RO17777320” -> „Hornbach” }.
+export function sanitizeStoreRules(obj) {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const [k, v] of Object.entries(obj).slice(0, 2000)) {
+    if (/^(RO)?\d{4,10}$/.test(k) && typeof v === 'string' && v.trim()) out[k] = str(v, 60).trim();
+  }
+  return out;
+}

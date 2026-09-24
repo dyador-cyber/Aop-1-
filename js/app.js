@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import { parseReceipt, parseOdometer, runQuery, isFuelExpense, normalize } from './parsers.js';
 import { recognize, compressImage as compressRaw } from './ocr.js';
-import { sanitize, sanitizeRules, sanitizeInvSubs, safeImageDataURL, csvCell, icsText } from './sanitize.js';
+import { sanitize, sanitizeRules, sanitizeInvSubs, sanitizeStoreRules, safeImageDataURL, csvCell, icsText } from './sanitize.js';
 import { SUBCATS, GROUPS, groupOf, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
 import { INV_STATUSES, OWNED, statusByKey, syncFromExpense, undoExpense, findSimilar, addMonths, WARRANTY_MONTHS } from './inventory.js';
 import { encryptText, decryptText } from './crypto.js';
@@ -33,6 +33,7 @@ const state = {
   prodFilter: { q: '', month: '', sub: '' },
   inventory: [],
   invSubs: ['tools'],
+  storeRules: {},
   invFilter: { q: '', status: 'owned', loc: '' },
 };
 
@@ -93,6 +94,7 @@ async function loadAll() {
   if (!state.vehicleId || !vehById(state.vehicleId)) state.vehicleId = state.vehicles[0]?.id || '';
   state.itemRules = sanitizeRules((await db.get('meta', 'itemRules'))?.rules);
   state.invSubs = sanitizeInvSubs((await db.get('meta', 'inventorySettings'))?.subs);
+  state.storeRules = sanitizeStoreRules((await db.get('meta', 'storeRules'))?.rules);
   state.inventory.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -665,7 +667,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     const applyParse = () => {
       const text = partTexts.filter(Boolean).join(PART_SEP);
       form.ocrText.value = text;
-      const r = parseReceipt(text);
+      const r = parseReceipt(text, new Date(), { storeRules: state.storeRules });
       const set = (name, val) => { if (val != null && val !== '' && !touched.has(name)) form[name].value = val; };
       set('date', r.date);
       set('store', r.store);
@@ -770,6 +772,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       const data = readExpenseForm(form, exp);
       if (data.total == null) { toast('Completează totalul'); return; }
       await learnSubcats(exp.items.filter((i) => i.manualSub));
+      if (touched.has('store')) await learnStore(data);
       if (!(await save('expenses', data))) return;
       closeModal();
       const saved = state.expenses.find((e) => e.id === data.id);
@@ -1020,6 +1023,14 @@ function exportInventoryCSV() {
   const rows = state.inventory.map((x) => [csvCell(x.name), n(x.qty), csvCell(x.location), csvCell(statusByKey(x.status).name), csvCell(x.lentTo), csvCell(x.lentDate),
     csvCell(x.purchaseDate), n(x.price), csvCell(x.store), csvCell(x.warrantyUntil), csvCell(subcatByKey(x.sub).name), csvCell(x.notes)].join(';'));
   download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `inventar-${todayISO()}.csv`);
+}
+
+// Ai corectat numele magazinului pe un bon cu CUI: data viitoare același CUI primește același nume.
+async function learnStore(e) {
+  const cif = parseReceipt(e.ocrText || '').cif;
+  if (!cif || !e.store) return;
+  state.storeRules = sanitizeStoreRules({ ...state.storeRules, [cif]: e.store });
+  await db.put('meta', { id: 'storeRules', rules: state.storeRules });
 }
 
 // Ține minte subcategoriile alese manual: data viitoare același produs e încadrat la fel.
