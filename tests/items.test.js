@@ -120,3 +120,73 @@ EY RON -129,00`;
 test('rândul de total citit greșit („MAL: RON”) nu devine produs', () => {
   assert.deepEqual(parseItems('HORNBACH CENTRALA SRL\nVISA DEBIT\nMAL: RON 1696,12\nPIN OK'), []);
 });
+
+test('scule electrice și de lucru ajung la „Scule & unelte”', () => {
+  for (const n of ['PROIECTOR LED 50W', 'Proiector cu senzor', 'COMPRESOR AER 50L', 'APARAT SUDURA INVERTOR', 'NIVELA LASER BOSCH', 'POLIZOR UNGHIULAR 125MM', 'MALAXOR 1600W'])
+    assert.equal(classifyItem(n), 'tools', n);
+  assert.equal(classifyItem('BEC LED E27'), 'electrical');
+});
+
+test('bon fiscal real Hornbach fotografiat în 3 părți suprapuse (text OCR cu zgomot)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const text = readFileSync(new URL('./fixtures/hornbach-bon-fiscal-3-poze.txt', import.meta.url), 'utf8');
+  const r = parseReceipt(text, new Date(2026, 8, 24));
+  assert.equal(r.store, 'Hornbach');
+  assert.equal(r.total, 1696.12);
+  assert.equal(r.isReturn, false);
+  const items = parseItems(text);
+  assert.equal(items.length, 18, 'POZIȚII: 18 – fără dubluri din zonele suprapuse');
+  assert.equal(+items.reduce((a, i) => a + i.amount, 0).toFixed(2), 1696.12, 'suma produselor = totalul bonului');
+  const tools = items.filter((i) => classifyItem(i.name) === 'tools').map((i) => [i.amount, i.qty]);
+  assert.deepEqual(tools, [[189.8, 2], [129, 1], [655, 1]], 'cele două proiectoare și cleștele');
+  assert.ok(items.filter((i) => classifyItem(i.name) === 'electrical').length >= 12);
+});
+
+test('dimensiunile din nume nu sunt cantități', () => {
+  const items = parseItems('1 BUC. x 17,90 LEI\nSCAME DOZĂ 95X95MM 17,90 A\nCM: ART/EAN 8001636210193\n1 BUC. x 655,00 LEI\nLP PROIE. STV. 2X50W 655,00 A\nSUBTOTAL LEI 672,90');
+  assert.deepEqual(items.map((i) => [i.name, i.qty, i.amount]), [['SCAME DOZĂ 95X95MM', 1, 17.9], ['LP PROIE. STV. 2X50W', 1, 655]]);
+  assert.equal(classifyItem('LP PROIE. STV. 2X50W'), 'tools');
+  assert.equal(classifyItem('NYM-J 3X1,5 MM INEL'), 'electrical');
+});
+
+test('aceeași poziție citită diferit în două poze (189,80 / 183,80) nu se dublează', () => {
+  const p1 = '2 BUC. x 94,90 LEI\nFS oD PROIECTOR 30M 189,80 A\nCM: ART/EAN 4306517910495\n2 BUC. x 15,70 LEI\nCOLIERE400X4,8MM ALB 31,40 A';
+  const p2 = '- BUC. x 94,90 LEI\nPROIECTOR 30W 183,80 A\nCM: ART/EAN 4306517910495\n2 BUC. x 15,70 LEI\nCOLIERE400X4,8MM ALB 31,40 A\nWAGO COMPACT CLEMA 35,50 A';
+  const items = parseItems(p1 + '\n--- continuare bon ---\n' + p2);
+  assert.deepEqual(items.map((i) => [i.name, i.amount, i.qty]), [['PROIECTOR 30W', 189.8, 2], ['COLIERE400X4,8MM ALB', 31.4, 2], ['WAGO COMPACT CLEMA', 35.5, null]]);
+});
+
+test('priza și cablul sunt „Materiale casă”, proiectorul e la „Scule”', async () => {
+  const { groupOf, SUBCATS, GROUPS } = await import('../js/items.js');
+  const { runQuery } = await import('../js/parsers.js');
+  assert.equal(classifyItem('PRIZĂ SCAME APL.IP66'), 'electrical');
+  assert.equal(groupOf('electrical').key, 'house');
+  assert.equal(groupOf('materials').key, 'house');
+  assert.equal(groupOf(classifyItem('LP PROIE. STV. 2X50W')).key, 'tools');
+  const ctx = { subcats: SUBCATS, groups: GROUPS, categories: [], projects: [], vehicles: [], odometer: [], expenses: [
+    { id: 'x', date: '2026-09-23', total: 889.9, store: 'Hornbach', items: [
+      { id: '1', name: 'PRIZĂ SCAME APL.IP66', amount: 99.9, sub: 'electrical' },
+      { id: '2', name: 'CIMENT 40KG', amount: 35, sub: 'materials' },
+      { id: '3', name: 'LP PROIE. STV. 2X50W', amount: 655, sub: 'tools' },
+      { id: '4', name: 'UNT', amount: 100, sub: 'dairy' }] }] };
+  const today = new Date(2026, 8, 24);
+  assert.equal(runQuery('materiale', ctx, today).total, 134.9);
+  assert.equal(runQuery('electrice', ctx, today).total, 99.9);
+  assert.equal(runQuery('mâncare', ctx, today).total, 100);
+  assert.equal(runQuery('scule', ctx, today).total, 655);
+});
+
+test('„materiale” = doar materialele de pe bon; „casa” = bonurile întregi', async () => {
+  const { SUBCATS, GROUPS } = await import('../js/items.js');
+  const { runQuery } = await import('../js/parsers.js');
+  const ctx = { subcats: SUBCATS, groups: GROUPS, projects: [], vehicles: [], odometer: [],
+    categories: [{ id: 'c', name: 'Casă – materiale construcții' }, { id: 'm', name: 'Mașină – combustibil', isFuel: true }],
+    expenses: [
+      { id: 'x', date: '2026-09-23', total: 754.9, categoryId: 'c', store: 'Hornbach', items: [
+        { id: '1', name: 'PRIZĂ SCAME', amount: 99.9, sub: 'electrical' }, { id: '2', name: 'PROIECTOR', amount: 655, sub: 'tools' }] },
+      { id: 'y', date: '2026-09-20', total: 300, categoryId: 'm', store: 'OMV', fuel: { liters: 40 } }] };
+  const today = new Date(2026, 8, 24);
+  assert.equal(runQuery('materiale', ctx, today).total, 99.9);
+  assert.equal(runQuery('Cât m-a costat casa?', ctx, today).total, 754.9);
+  assert.equal(runQuery('cheltuieli mașină', ctx, today).total, 300);
+});

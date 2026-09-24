@@ -94,10 +94,12 @@ function applyReturn(e, inventory, { subs, out }) {
   for (const i of (e.items || []).filter((it) => subs.includes(it.sub))) {
     if (done.has(`${e.id}:${i.id}`)) continue;
     const n = Math.max(1, Math.round(Math.abs(i.qty || 1)));
+    // prețul returnat pe bucată: dovadă puternică, alături de legătura cu bonul original
+    const unit = Math.abs(i.unitPrice || (i.amount / (Math.abs(i.qty || 1) || 1)));
     const cands = inv
       .filter((x) => OWNED.has(x.status) && x.qty > 0)
-      .map((x) => ({ x, s: similarity(x.name, i.name) }))
-      .filter((c) => c.s >= 0.6)
+      .map((x) => ({ x, s: similarity(x.name, i.name), samePrice: x.price > 0 && Math.abs(x.price - unit) < 0.011 }))
+      .filter((c) => c.s >= 0.6 || (c.samePrice && (c.s >= 0.3 || (e.returnOf && c.x.expenseId === e.returnOf))))
       .map((c) => ({ ...c, score: c.s + (e.returnOf && c.x.expenseId === e.returnOf ? 2 : 0) + (storeN && normalize(c.x.store) === storeN ? 1 : 0) }))
       .sort((a, b) => b.score - a.score || (b.x.purchaseDate || '').localeCompare(a.x.purchaseDate || ''));
     const best = cands[0]?.x;

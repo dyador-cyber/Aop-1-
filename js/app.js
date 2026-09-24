@@ -2,7 +2,7 @@ import * as db from './db.js';
 import { parseReceipt, parseOdometer, runQuery, isFuelExpense, normalize } from './parsers.js';
 import { recognize, compressImage as compressRaw } from './ocr.js';
 import { sanitize, sanitizeRules, sanitizeInvSubs, safeImageDataURL, csvCell, icsText } from './sanitize.js';
-import { SUBCATS, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
+import { SUBCATS, GROUPS, groupOf, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
 import { INV_STATUSES, OWNED, statusByKey, syncFromExpense, undoExpense, findSimilar, addMonths, WARRANTY_MONTHS } from './inventory.js';
 import { encryptText, decryptText } from './crypto.js';
 
@@ -296,8 +296,10 @@ function renderProducts() {
   const avgUnit = withUnit.length ? withUnit.reduce((a, i) => a + i.unitPrice, 0) / withUnit.length : null;
   const qtySum = sel.reduce((a, i) => a + (i.qty > 0 ? i.qty : i.qty == null ? 1 : 0), 0);
   const noItems = state.expenses.filter((e) => (!f.month || (e.date || '').startsWith(f.month)) && !(e.items || []).length).length;
-  const rows = SUBCATS.filter((c) => bySub[c.name] !== undefined)
-    .sort((a, b) => bySub[b.name] - bySub[a.name]);
+  const byGroup = {};
+  for (const i of items) { const g = groupOf(i.sub).key; byGroup[g] = (byGroup[g] || 0) + (+i.amount || 0); }
+  const groups = GROUPS.filter((g) => byGroup[g.key] !== undefined).sort((a, b) => byGroup[b.key] - byGroup[a.key]);
+  const pct = (v) => (total ? Math.round(v / total * 100) : 0);
   return `${modeSwitch()}
   <section class="card filters">
     <input id="p-q" type="search" placeholder="Caută produs: unt, ciment, detergent…" value="${esc(f.q)}">
@@ -314,10 +316,15 @@ function renderProducts() {
       <div><b>${money(selTotal / sel.length)}</b><span>medie pe cumpărare</span></div></div>` : ''}
     <ul class="list">${sel.slice(0, 300).map(itemRow).join('') || '<li class="muted pad">Nimic găsit.</li>'}</ul>
   </section>` : ''}
-  <section class="card"><h3>Pe subcategorii: ${money(total)}</h3>
-    ${rows.length ? `<table class="breakdown"><tbody>${rows.map((c) => `<tr class="click" data-action="prod-sub" data-sub="${c.key}">
-      <td><span class="dot" style="background:${esc(c.color)}"></span>${esc(c.name)} <span class="muted small">(${countSub[c.key]})</span></td>
-      <td class="num">${money(bySub[c.name])}</td><td class="num muted">${total ? Math.round(bySub[c.name] / total * 100) : 0}%</td></tr>`).join('')}</tbody></table>`
+  <section class="card"><h3>Pe grupe și subcategorii: ${money(total)}</h3>
+    ${groups.length ? `<table class="breakdown"><tbody>${groups.map((g) => {
+      const subs = SUBCATS.filter((c) => c.group === g.key && bySub[c.name] !== undefined).sort((a, b) => bySub[b.name] - bySub[a.name]);
+      const single = SUBCATS.filter((c) => c.group === g.key).length === 1;
+      return `<tr class="group-row ${single ? 'click' : ''}" ${single ? `data-action="prod-sub" data-sub="${subs[0]?.key}"` : ''}><td><b>${esc(g.name)}</b>${single ? ` <span class="muted small">(${countSub[subs[0]?.key]})</span>` : ''}</td><td class="num"><b>${money(byGroup[g.key])}</b></td><td class="num muted">${pct(byGroup[g.key])}%</td></tr>`
+        + (SUBCATS.filter((c) => c.group === g.key).length > 1 ? subs.map((c) => `<tr class="click sub-row" data-action="prod-sub" data-sub="${c.key}">
+          <td><span class="dot" style="background:${esc(c.color)}"></span>${esc(c.name.replace(/^Materiale – (.)/, (m, ch) => ch.toUpperCase()))} <span class="muted small">(${countSub[c.key]})</span></td>
+          <td class="num">${money(bySub[c.name])}</td><td class="num muted">${pct(bySub[c.name])}%</td></tr>`).join('') : '');
+    }).join('')}</tbody></table>`
       : '<p class="muted">Niciun produs încă. Produsele se citesc automat de pe bonurile noi fotografiate.</p>'}
     ${noItems ? `<p class="muted small">${bonuri(noItems)} fără produse citite (de ex. bonuri de card sau introduse manual).</p>` : ''}
   </section>`;
@@ -700,7 +707,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
         const r = applyParse();
         if (--pending === 0) {
           st.textContent = r.total != null
-            ? `✅ Bon citit${total > 1 ? ` (${total} poze)` : ''}. Verifică valorile și salvează.${r.dateWarning}${total === 1 ? ' Bon lung? Apasă „➕ Continuare bon”.' : ''}`
+            ? `✅ Bon citit${total > 1 ? ` (${total} poze)` : ''}. Verifică valorile și salvează.${r.dateWarning}${total === 1 ? ' Bon lung? Apasă „➕ Continuare bon”.' : ''}${exp.items.length ? '' : ' ℹ️ Nu am găsit produse pe bon (poate e chitanța de la card). Dacă vrei produsele în analize și în inventar, adaugă-le în „🧾 Produse” sau fotografiază bonul fiscal.'}`
             : '⚠️ Nu am găsit totalul. Dacă bonul e lung, apasă „➕ Continuare bon” și fotografiază partea de jos. Sfat: bonul întins, fără umbre, cât mai aproape.';
         }
       } catch (err) {
@@ -883,7 +890,7 @@ function renderInventory() {
   </section>
   ${Object.keys(groups).sort().map((loc) => `<section class="card"><h3>📍 ${esc(loc || 'Fără loc stabilit')} <span class="muted small">(${groups[loc].length})</span></h3>
     <ul class="list">${groups[loc].map(invRow).join('')}</ul></section>`).join('')
-    || `<p class="muted center">${state.inventory.length ? 'Nimic găsit.' : 'Inventarul e gol. Fotografiază bonuri cu scule sau adaugă manual sculele pe care le ai.'}</p>`}`;
+    || `<p class="muted center">${state.inventory.length ? 'Nimic găsit.' : 'Inventarul e gol. Sculele intră automat din <b>produsele</b> bonurilor (chitanța de la card nu are produse). Deschide bonul și adaugă produsul în „🧾 Produse”, sau apasă „+ Adaugă sculă” și alege bonul.'}</p>`}`;
 }
 
 function openInventory(x) {
@@ -915,6 +922,11 @@ function openInventory(x) {
     </div>
     <label>Subcategorie<select name="sub">${SUBCATS.map((c) => `<option value="${c.key}" ${c.key === x.sub ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
     <label>Notițe (serie, accesorii, baterii…)<textarea name="notes" rows="2">${esc(x.notes || '')}</textarea></label>
+    <label>Bonul de cumpărare (dovadă pentru garanție)<select name="expenseId">
+      <option value="">— fără bon —</option>
+      ${state.expenses.filter((e) => !e.isReturn).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 150).map((e) =>
+        `<option value="${esc(e.id)}" ${e.id === x.expenseId ? 'selected' : ''}>${fmtDate(e.date)} · ${esc(e.store || '?')} · ${esc(money(e.total))}</option>`).join('')}
+    </select></label>
     ${exp ? `<p><button type="button" class="link" data-action="edit-expense" data-id="${esc(exp.id)}">🧾 Vezi bonul (${fmtDate(exp.date)} · ${esc(exp.store || '')} · ${money(exp.total)})</button></p>` : ''}
     ${(x.returns || []).length ? `<p class="muted small">↩️ Returnat ${x.returns.reduce((a, r) => a + r.qty, 0)} buc.</p>` : ''}
     <div class="actions">
@@ -936,6 +948,14 @@ function openInventory(x) {
     };
     form.name.addEventListener('change', dupCheck);
     if (isNew && x.name) dupCheck();
+    // alegerea bonului completează data, magazinul și garanția
+    form.expenseId.addEventListener('change', () => {
+      const e = state.expenses.find((i) => i.id === form.expenseId.value);
+      if (!e) return;
+      if (!form.purchaseDate.value) form.purchaseDate.value = e.date;
+      if (!form.store.value) form.store.value = e.store || '';
+      if (!form.warrantyUntil.value && e.date) form.warrantyUntil.value = addMonths(e.date, WARRANTY_MONTHS);
+    });
     form.purchaseDate.addEventListener('change', () => {
       if (!form.warrantyUntil.value && form.purchaseDate.value) form.warrantyUntil.value = addMonths(form.purchaseDate.value, WARRANTY_MONTHS);
     });
@@ -973,6 +993,8 @@ function readInv(form, x) {
     warrantyUntil: form.warrantyUntil.value,
     sub: form.sub.value,
     notes: form.notes.value.trim(),
+    expenseId: form.expenseId.value,
+    itemId: form.expenseId.value === x.expenseId ? x.itemId : '',
     edited: true,
     createdAt: x.createdAt || Date.now(),
   };
@@ -1292,9 +1314,9 @@ function exportCSV() {
 
 function exportItemsCSV() {
   const n = (x) => (x == null || x === '' ? '' : String(+x).replace('.', ','));
-  const head = ['Data', 'Magazin', 'Produs', 'Subcategorie', 'Cantitate', 'Pret unitar', 'Suma', 'Categorie bon', 'Proiect', 'Retur'];
+  const head = ['Data', 'Magazin', 'Produs', 'Grupa', 'Subcategorie', 'Cantitate', 'Pret unitar', 'Suma', 'Categorie bon', 'Proiect', 'Retur'];
   const rows = allItems().sort((a, b) => a.e.date.localeCompare(b.e.date)).map((i) => [
-    csvCell(i.e.date), csvCell(i.e.store), csvCell(i.name), csvCell(subcatByKey(i.sub).name), n(i.qty), n(i.unitPrice), n(i.amount),
+    csvCell(i.e.date), csvCell(i.e.store), csvCell(i.name), csvCell(groupOf(i.sub).name.replace(/^\S+\s/, '')), csvCell(subcatByKey(i.sub).name), n(i.qty), n(i.unitPrice), n(i.amount),
     csvCell(catById(i.e.categoryId)?.name), csvCell(projById(i.e.projectId)?.name), i.e.isReturn ? 'da' : ''].join(';'));
   download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `produse-${todayISO()}.csv`);
 }
@@ -1474,7 +1496,7 @@ const actions = {
 };
 
 function doAsk() {
-  state.askResult = state.ask.trim() ? runQuery(state.ask, { ...state, subcats: SUBCATS }) : null;
+  state.askResult = state.ask.trim() ? runQuery(state.ask, { ...state, subcats: SUBCATS, groups: GROUPS }) : null;
   render();
 }
 
