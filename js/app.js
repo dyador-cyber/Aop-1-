@@ -1,7 +1,8 @@
 import * as db from './db.js';
-import { parseReceipt, parseOdometer, runQuery, isFuelExpense } from './parsers.js';
+import { parseReceipt, parseOdometer, runQuery, isFuelExpense, normalize } from './parsers.js';
 import { recognize, compressImage as compressRaw } from './ocr.js';
-import { sanitize, safeImageDataURL, csvCell, icsText } from './sanitize.js';
+import { sanitize, sanitizeRules, safeImageDataURL, csvCell, icsText } from './sanitize.js';
+import { SUBCATS, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
 import { encryptText, decryptText } from './crypto.js';
 
 const RC = globalThis.ReminderCore;
@@ -26,6 +27,9 @@ const state = {
   filter: { q: '', cat: '', proj: '', month: '' },
   vehicleId: '',
   ask: '', askResult: null,
+  itemRules: {},
+  receiptsMode: 'bills',
+  prodFilter: { q: '', month: '', sub: '' },
 };
 
 // ---------- utilitare ----------
@@ -83,6 +87,7 @@ async function loadAll() {
   state.categories.sort((a, b) => (a.order ?? 99) - (b.order ?? 99) || a.name.localeCompare(b.name));
   state.projects.sort((a, b) => a.name.localeCompare(b.name));
   if (!state.vehicleId || !vehById(state.vehicleId)) state.vehicleId = state.vehicles[0]?.id || '';
+  state.itemRules = sanitizeRules((await db.get('meta', 'itemRules'))?.rules);
 }
 
 async function seed() {
@@ -140,7 +145,7 @@ function expenseRow(e) {
   return `<li class="row" data-action="edit-expense" data-id="${esc(e.id)}">
     ${img ? `<img class="thumb" src="${img}" alt="">` : '<div class="thumb ph">🧾</div>'}
     <div class="grow">
-      <div class="title">${esc(e.store || 'Fără nume')}${e.extraImages?.length ? ` <span class="muted small">📄×${e.extraImages.length + 1}</span>` : ''}</div>
+      <div class="title">${e.isReturn ? '↩️ ' : ''}${esc(e.store || 'Fără nume')}${e.extraImages?.length ? ` <span class="muted small">📄×${e.extraImages.length + 1}</span>` : ''}</div>
       <div class="sub">${fmtDate(e.date)} · <span class="dot" style="background:${esc(cat?.color || '#999')}"></span>${esc(cat?.name || 'Fără categorie')}${proj ? ' · 📁 ' + esc(proj.name) : ''}${fuel}</div>
     </div>
     <div class="amount">${money(e.total)}</div>
@@ -162,7 +167,7 @@ function breakdown(obj, total) {
   const rows = Object.entries(obj).sort((a, b) => b[1] - a[1]);
   if (!rows.length) return '';
   return `<table class="breakdown"><tbody>${rows.map(([k, v]) => {
-    const c = state.categories.find((x) => x.name === k);
+    const c = state.categories.find((x) => x.name === k) || SUBCATS.find((x) => x.name === k);
     return `<tr><td><span class="dot" style="background:${esc(c?.color || '#999')}"></span>${esc(k)}</td>
       <td class="num">${money(v)}</td><td class="num muted">${total ? Math.round(v / total * 100) : 0}%</td></tr>`;
   }).join('')}</tbody></table>`;
@@ -183,12 +188,13 @@ function renderAskResult() {
     </div>` : r.query.km && r.kmInfo ? `<div class="kpis"><div><b>${r.kmInfo.driven != null ? num(r.kmInfo.driven, 0) + ' km' : '—'}</b><span>parcurși</span></div></div>` : '';
   return `<div class="card result">
     <div class="big">${money(r.total)}</div>
-    <div class="muted">${bonuri(r.expenses.length)} · ${esc(r.label)}${r.matchedTerms.length ? ' · „' + esc(r.matchedTerms.join(' ')) + '”' : ''}</div>
+    <div class="muted">${r.items ? `${r.items.length} ${r.items.length === 1 ? 'produs' : 'produse'} din ` : ''}${bonuri(r.expenses.length)} · ${esc(r.label)}${r.matchedTerms.length ? ' · „' + esc(r.matchedTerms.join(' ')) + '”' : ''}</div>
     ${r.unmatched.length ? `<div class="muted small">Ignorat: ${esc(r.unmatched.join(', '))}</div>` : ''}
     ${fuelLine}
     ${breakdown(r.byCategory, r.total)}
     ${Object.keys(r.byProject).length ? `<h4>Pe proiecte</h4>${breakdown(r.byProject, r.total)}` : ''}
-    <details><summary>Vezi bonurile (${r.expenses.length})</summary><ul class="list">${r.expenses.slice(0, 200).map(expenseRow).join('')}</ul></details>
+    ${r.items ? `<details open><summary>Vezi produsele (${r.items.length})</summary><ul class="list">${r.items.slice(0, 200).map(itemRow).join('')}</ul></details>`
+    : `<details><summary>Vezi bonurile (${r.expenses.length})</summary><ul class="list">${r.expenses.slice(0, 200).map(expenseRow).join('')}</ul></details>`}
   </div>`;
 }
 
@@ -211,7 +217,7 @@ function renderHome() {
       <button class="primary">Caută</button>
     </form>
     <div class="chips">
-      ${['Cât m-a costat casa?', 'Cât am dat pe benzină anul acesta?', 'Cheltuieli mașină luna asta', 'Dedeman', 'Consum luna trecută']
+      ${['Cât m-a costat casa?', 'Cât am dat pe benzină anul acesta?', 'Băuturi luna asta', 'Scule', 'Unt', 'Cheltuieli mașină luna asta', 'Consum luna trecută']
         .map((c) => `<button class="chip" data-action="ask" data-q="${esc(c)}">${esc(c)}</button>`).join('')}
     </div>
   </section>
@@ -243,11 +249,79 @@ function filteredExpenses() {
     .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0));
 }
 
+function modeSwitch() {
+  const m = state.receiptsMode;
+  return `<div class="seg" role="tablist">
+    <button data-action="rmode" data-mode="bills" class="${m === 'bills' ? 'on' : ''}">🧾 Bonuri</button>
+    <button data-action="rmode" data-mode="products" class="${m === 'products' ? 'on' : ''}">📊 Produse</button></div>`;
+}
+
+// Toate produsele de pe bonuri, cu bonul din care provin.
+function allItems(month = '') {
+  return state.expenses.filter((e) => !month || (e.date || '').startsWith(month))
+    .flatMap((e) => (e.items || []).map((i) => ({ ...i, e })));
+}
+
+function itemRow(i) {
+  const sc = subcatByKey(i.sub);
+  return `<li class="row" data-action="edit-expense" data-id="${esc(i.e.id)}">
+    <div class="grow"><div class="title">${i.amount < 0 ? '↩️ ' : ''}${esc(i.name)}</div>
+    <div class="sub">${fmtDate(i.e.date)} · ${esc(i.e.store || '?')} · <span class="dot" style="background:${esc(sc.color)}"></span>${esc(sc.name)}${i.qty != null ? ` · ${num(i.qty, 3)} × ${money(i.unitPrice)}` : ''}</div></div>
+    <div class="amount">${money(i.amount)}</div></li>`;
+}
+
+function renderProducts() {
+  const f = state.prodFilter;
+  const items = allItems(f.month);
+  const bySub = {};
+  const countSub = {};
+  for (const i of items) {
+    const n = subcatByKey(i.sub).name;
+    bySub[n] = (bySub[n] || 0) + (+i.amount || 0);
+    countSub[i.sub] = (countSub[i.sub] || 0) + 1;
+  }
+  const total = items.reduce((a, i) => a + (+i.amount || 0), 0);
+  const q = normalize(f.q.trim());
+  const sel = items.filter((i) => (!f.sub || i.sub === f.sub) && (!q || normalize(i.name).includes(q)))
+    .sort((a, b) => b.e.date.localeCompare(a.e.date));
+  const selTotal = sel.reduce((a, i) => a + (+i.amount || 0), 0);
+  const withUnit = sel.filter((i) => i.unitPrice > 0);
+  const avgUnit = withUnit.length ? withUnit.reduce((a, i) => a + i.unitPrice, 0) / withUnit.length : null;
+  const qtySum = sel.reduce((a, i) => a + (i.qty > 0 ? i.qty : i.qty == null ? 1 : 0), 0);
+  const noItems = state.expenses.filter((e) => (!f.month || (e.date || '').startsWith(f.month)) && !(e.items || []).length).length;
+  const rows = SUBCATS.filter((c) => bySub[c.name] !== undefined)
+    .sort((a, b) => bySub[b.name] - bySub[a.name]);
+  return `${modeSwitch()}
+  <section class="card filters">
+    <input id="p-q" type="search" placeholder="Caută produs: unt, ciment, detergent…" value="${esc(f.q)}">
+    <div class="grid2">
+      <select id="p-sub"><option value="">Toate subcategoriile</option>${SUBCATS.map((c) => `<option value="${c.key}" ${c.key === f.sub ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <input id="p-month" type="month" value="${esc(f.month)}">
+    </div>
+  </section>
+  ${f.q || f.sub ? `<section class="card result">
+    <div class="big">${money(selTotal)}</div>
+    <div class="muted">${sel.length} ${sel.length === 1 ? 'produs' : 'produse'}${f.q ? ` „${esc(f.q)}”` : ''}${f.sub ? ` · ${esc(subcatByKey(f.sub).name)}` : ''}${f.month ? ` · ${esc(f.month)}` : ''}</div>
+    ${sel.length ? `<div class="kpis"><div><b>${num(qtySum, 2)}</b><span>bucăți / cantitate</span></div>
+      ${avgUnit != null ? `<div><b>${money(avgUnit)}</b><span>preț mediu / unitate</span></div>` : ''}
+      <div><b>${money(selTotal / sel.length)}</b><span>medie pe cumpărare</span></div></div>` : ''}
+    <ul class="list">${sel.slice(0, 300).map(itemRow).join('') || '<li class="muted pad">Nimic găsit.</li>'}</ul>
+  </section>` : ''}
+  <section class="card"><h3>Pe subcategorii: ${money(total)}</h3>
+    ${rows.length ? `<table class="breakdown"><tbody>${rows.map((c) => `<tr class="click" data-action="prod-sub" data-sub="${c.key}">
+      <td><span class="dot" style="background:${esc(c.color)}"></span>${esc(c.name)} <span class="muted small">(${countSub[c.key]})</span></td>
+      <td class="num">${money(bySub[c.name])}</td><td class="num muted">${total ? Math.round(bySub[c.name] / total * 100) : 0}%</td></tr>`).join('')}</tbody></table>`
+      : '<p class="muted">Niciun produs încă. Produsele se citesc automat de pe bonurile noi fotografiate.</p>'}
+    ${noItems ? `<p class="muted small">${bonuri(noItems)} fără produse citite (de ex. bonuri de card sau introduse manual).</p>` : ''}
+  </section>`;
+}
+
 function renderReceipts() {
+  if (state.receiptsMode === 'products') return renderProducts();
   const list = filteredExpenses();
   const total = list.reduce((s, e) => s + (+e.total || 0), 0);
   const f = state.filter;
-  return `
+  return `${modeSwitch()}
   <section class="quick two">
     <button class="big-btn" data-action="photo-receipt">📷<span>Fotografiază bon</span></button>
     <button class="big-btn" data-action="gallery-receipt">🖼️<span>Din galerie</span></button>
@@ -387,6 +461,7 @@ function renderSettings() {
     <p class="small muted">CSV-ul se deschide în Excel și poate fi importat în programe de facturare / contabilitate. Backup-ul JSON conține tot, inclusiv pozele.</p>
     <div class="row-flex wrap">
       <button data-action="export-csv">⬇️ CSV cheltuieli</button>
+      <button data-action="export-items-csv">⬇️ CSV produse</button>
       <button data-action="export-json">⬇️ Backup complet (JSON)</button>
       <button data-action="import-json">⬆️ Restaurare backup</button>
     </div></section>
@@ -406,6 +481,10 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       <label>Data<input name="date" type="date" value="${esc(exp.date)}" required></label>
       <label>Total (lei)<input name="total" inputmode="decimal" value="${esc(exp.total ?? '')}" required></label>
     </div>
+    <label class="check"><input type="checkbox" name="isReturn" ${exp.isReturn ? 'checked' : ''}> ↩️ Retur (suma se scade din cheltuieli)</label>
+    <div id="return-box" class="${exp.isReturn ? '' : 'hidden'}">
+      <label>Bonul original (opțional)<select name="returnOf"></select></label>
+    </div>
     <label>Magazin / furnizor<input name="store" value="${esc(exp.store)}"></label>
     <label>Categorie<select name="categoryId">${options(state.categories, exp.categoryId, '— alege —')}</select></label>
     <label>Proiect<select name="projectId">${options(state.projects, exp.projectId)}</select></label>
@@ -421,6 +500,10 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       <label>Tip carburant<input name="fuelType" list="fuel-types" value="${esc(exp.fuel?.fuelType || '')}"></label>
       <datalist id="fuel-types"><option>benzină</option><option>motorină</option><option>GPL</option><option>electric (kWh)</option></datalist>
     </fieldset>
+    <details id="items-box" ${exp.items?.length ? 'open' : ''}><summary>🧾 Produse (<span id="items-count">0</span>) <span id="items-sum" class="muted small"></span></summary>
+      <div id="items-list"></div>
+      <button type="button" id="item-add" class="link">+ Adaugă produs</button>
+    </details>
     <label>Notițe<textarea name="notes" rows="2">${esc(exp.notes)}</textarea></label>
     <details><summary>Text citit de pe bon</summary><textarea name="ocrText" rows="6">${esc(exp.ocrText)}</textarea></details>
     <div class="actions">
@@ -448,6 +531,92 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     };
     form.liters.addEventListener('change', recalc);
     form.total.addEventListener('change', recalc);
+
+    // ---- produse
+    exp.items = (exp.items || []).map((i) => ({ ...i }));
+    let itemsTouched = exp.items.length > 0;
+    const subOptions = (sel) => SUBCATS.map((c) => `<option value="${c.key}" ${c.key === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+    const updateItemsSum = () => {
+      const sum = exp.items.reduce((a, i) => a + (+i.amount || 0), 0);
+      const t = toNum(form.total.value);
+      $('#items-count', root).textContent = exp.items.length;
+      $('#items-sum', root).textContent = exp.items.length
+        ? `· suma ${num(sum)}${t != null ? (Math.abs(Math.abs(sum) - Math.abs(t)) < 0.05 ? ' ✓ = total' : ` ≠ total ${num(t)}`) : ''}` : '';
+    };
+    const renderItems = () => {
+      $('#items-list', root).innerHTML = exp.items.map((i) => `<div class="item-row" data-id="${esc(i.id)}">
+        <input class="it-name" value="${esc(i.name)}" aria-label="Produs">
+        <input class="it-amount" inputmode="decimal" value="${esc(i.amount ?? '')}" aria-label="Sumă">
+        <select class="it-sub" aria-label="Subcategorie">${subOptions(i.sub)}</select>
+        <button type="button" class="it-del" aria-label="Șterge produsul">✕</button></div>`).join('')
+        || '<p class="muted small">Niciun produs citit. Le poți adăuga manual.</p>';
+      updateItemsSum();
+    };
+    const itemOf = (el) => exp.items.find((i) => i.id === el.closest('.item-row')?.dataset.id);
+    $('#items-list', root).addEventListener('input', (ev) => {
+      ev.stopPropagation();
+      const it = itemOf(ev.target);
+      if (!it) return;
+      itemsTouched = true;
+      if (ev.target.classList.contains('it-name')) it.name = ev.target.value;
+      if (ev.target.classList.contains('it-amount')) { it.amount = toNum(ev.target.value); updateItemsSum(); }
+    });
+    $('#items-list', root).addEventListener('change', (ev) => {
+      ev.stopPropagation();
+      const it = itemOf(ev.target);
+      if (!it) return;
+      if (ev.target.classList.contains('it-sub')) { it.sub = ev.target.value; it.manualSub = true; }
+      if (ev.target.classList.contains('it-name') && !it.manualSub) {
+        it.sub = classifyItem(it.name, state.itemRules);
+        ev.target.closest('.item-row').querySelector('.it-sub').value = it.sub;
+      }
+    });
+    $('#items-list', root).addEventListener('click', (ev) => {
+      if (!ev.target.classList.contains('it-del')) return;
+      const it = itemOf(ev.target);
+      exp.items = exp.items.filter((x) => x !== it);
+      itemsTouched = true;
+      renderItems();
+    });
+    $('#item-add', root).addEventListener('click', () => {
+      exp.items.push({ id: db.uid(), name: '', qty: null, unitPrice: null, amount: null, sub: 'other' });
+      itemsTouched = true;
+      $('#items-box', root).open = true;
+      renderItems();
+      $('#items-list .item-row:last-child .it-name', root)?.focus();
+    });
+    form.total.addEventListener('input', updateItemsSum);
+
+    // ---- retur
+    const fillReturnOf = () => {
+      const store = normalize(form.store.value);
+      const cands = state.expenses.filter((e) => e.id !== exp.id && !e.isReturn)
+        .sort((a, b) => (normalize(b.store) === store) - (normalize(a.store) === store) || b.date.localeCompare(a.date)).slice(0, 60);
+      const cur = form.returnOf.value || exp.returnOf || '';
+      form.returnOf.innerHTML = '<option value="">— nelegat —</option>' + cands.map((e) =>
+        `<option value="${esc(e.id)}" ${e.id === cur ? 'selected' : ''}>${fmtDate(e.date)} · ${esc(e.store || '?')} · ${esc(money(e.total))}</option>`).join('');
+    };
+    const syncReturn = (autoLink = false) => {
+      const on = form.isReturn.checked;
+      $('#return-box', root).classList.toggle('hidden', !on);
+      const t = toNum(form.total.value);
+      if (t != null) form.total.value = (on ? -Math.abs(t) : Math.abs(t)).toFixed(2);
+      exp.items.forEach((i) => { if (i.amount != null && on) i.amount = -Math.abs(i.amount); });
+      if (on) {
+        fillReturnOf();
+        if (autoLink && !form.returnOf.value) {
+          // cel mai recent bon de la același magazin, dinainte de retur
+          const store = normalize(form.store.value);
+          const orig = state.expenses.filter((e) => !e.isReturn && e.id !== exp.id && store && normalize(e.store) === store && e.date <= (form.date.value || '9'))
+            .sort((a, b) => b.date.localeCompare(a.date))[0];
+          if (orig) form.returnOf.value = orig.id;
+        }
+      }
+      renderItems();
+    };
+    form.isReturn.addEventListener('change', () => syncReturn(true));
+    renderItems();
+    if (exp.isReturn) fillReturnOf();
 
     // Bonurile lungi: fiecare poză e citită separat, textele se lipesc în ordine
     // (magazin/dată/CUI din prima parte, totalul de obicei din ultima).
@@ -481,6 +650,12 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       set('date', r.date);
       set('store', r.store);
       set('total', r.total != null ? r.total.toFixed(2) : '');
+      if (!touched.has('isReturn') && r.isReturn !== form.isReturn.checked) { form.isReturn.checked = r.isReturn; }
+      if (!itemsTouched) {
+        exp.items = parseItems(text, { isReturn: r.isReturn }).map((i) => ({ id: db.uid(), ...i, sub: classifyItem(i.name, state.itemRules) }));
+        if (exp.items.length) $('#items-box', root).open = true;
+      }
+      syncReturn(true);
       if (r.suggestedCategoryKey && !touched.has('categoryId')) {
         const c = state.categories.find((x) => x.key === r.suggestedCategoryKey);
         if (c) form.categoryId.value = c.id;
@@ -569,6 +744,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       ev.preventDefault();
       const data = readExpenseForm(form, exp);
       if (data.total == null) { toast('Completează totalul'); return; }
+      await learnSubcats(exp.items.filter((i) => i.manualSub));
       if (!(await save('expenses', data))) return;
       closeModal();
       toast('Bon salvat ✔');
@@ -581,10 +757,18 @@ function readExpenseForm(form, exp) {
   const km = toNum(form.km.value);
   const cat = catById(form.categoryId.value);
   const hasFuel = liters || cat?.isFuel;
+  let total = toNum(form.total.value);
+  const isReturn = form.isReturn.checked || (total != null && total < 0);
+  if (total != null) total = isReturn ? -Math.abs(total) : Math.abs(total);
+  const items = (exp.items || []).filter((i) => i.name.trim() && i.amount != null)
+    .map(({ manualSub, ...i }) => ({ ...i, name: i.name.trim(), amount: isReturn ? -Math.abs(i.amount) : i.amount }));
   return {
     ...exp,
     date: form.date.value || todayISO(),
-    total: toNum(form.total.value),
+    total,
+    isReturn,
+    returnOf: isReturn ? form.returnOf.value : '',
+    items,
     store: form.store.value.trim(),
     categoryId: form.categoryId.value,
     projectId: form.projectId.value,
@@ -595,6 +779,20 @@ function readExpenseForm(form, exp) {
     createdAt: exp.createdAt || Date.now(),
     updatedAt: Date.now(),
   };
+}
+
+// Ține minte subcategoriile alese manual: data viitoare același produs e încadrat la fel.
+async function learnSubcats(items) {
+  if (!items.length) return;
+  const rules = { ...state.itemRules };
+  for (const i of items) {
+    const key = itemKey(i.name);
+    if (!key) continue;
+    if (i.sub === classifyItem(i.name)) delete rules[key];
+    else rules[key] = i.sub;
+  }
+  state.itemRules = sanitizeRules(rules);
+  await db.put('meta', { id: 'itemRules', rules: state.itemRules });
 }
 
 function newExpense(extra = {}) {
@@ -873,6 +1071,15 @@ function exportCSV() {
   download(new Blob(['﻿' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `cheltuieli-${todayISO()}.csv`);
 }
 
+function exportItemsCSV() {
+  const n = (x) => (x == null || x === '' ? '' : String(+x).replace('.', ','));
+  const head = ['Data', 'Magazin', 'Produs', 'Subcategorie', 'Cantitate', 'Pret unitar', 'Suma', 'Categorie bon', 'Proiect', 'Retur'];
+  const rows = allItems().sort((a, b) => a.e.date.localeCompare(b.e.date)).map((i) => [
+    csvCell(i.e.date), csvCell(i.e.store), csvCell(i.name), csvCell(subcatByKey(i.sub).name), n(i.qty), n(i.unitPrice), n(i.amount),
+    csvCell(catById(i.e.categoryId)?.name), csvCell(projById(i.e.projectId)?.name), i.e.isReturn ? 'da' : ''].join(';'));
+  download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `produse-${todayISO()}.csv`);
+}
+
 const blobToDataURL = (b) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(b); });
 function dataURLToBlob(url) {
   const [head, b64] = url.split(',');
@@ -1027,6 +1234,9 @@ const actions = {
     await notify({ key: 'test', title: '🔔 Test', body: 'Notificările funcționează.' });
   },
   'export-csv': exportCSV,
+  'export-items-csv': exportItemsCSV,
+  rmode: (el) => { state.receiptsMode = el.dataset.mode; render(); },
+  'prod-sub': (el) => { state.prodFilter.sub = state.prodFilter.sub === el.dataset.sub ? '' : el.dataset.sub; state.view = 'receipts'; state.receiptsMode = 'products'; render(); },
   'export-json': exportJSON,
   'import-json': importJSON,
   wipe,
@@ -1034,7 +1244,7 @@ const actions = {
 };
 
 function doAsk() {
-  state.askResult = state.ask.trim() ? runQuery(state.ask, state) : null;
+  state.askResult = state.ask.trim() ? runQuery(state.ask, { ...state, subcats: SUBCATS }) : null;
   render();
 }
 
@@ -1066,12 +1276,15 @@ document.addEventListener('submit', async (ev) => {
 document.addEventListener('input', (ev) => {
   const id = ev.target.id;
   if (id === 'f-q') { state.filter.q = ev.target.value; rerenderKeepFocus(id); }
+  if (id === 'p-q') { state.prodFilter.q = ev.target.value; rerenderKeepFocus(id); }
 });
 document.addEventListener('change', (ev) => {
   const id = ev.target.id;
   if (id === 'f-cat') state.filter.cat = ev.target.value;
   else if (id === 'f-proj') state.filter.proj = ev.target.value;
   else if (id === 'f-month') state.filter.month = ev.target.value;
+  else if (id === 'p-month') state.prodFilter.month = ev.target.value;
+  else if (id === 'p-sub') state.prodFilter.sub = ev.target.value;
   else if (id === 'veh-select') state.vehicleId = ev.target.value;
   else if (ev.target.name === 'projectId' && ev.target.closest('#exp-form')) { try { localStorage.setItem('lastProject', ev.target.value); } catch { /* ignoră */ } return; }
   else return;

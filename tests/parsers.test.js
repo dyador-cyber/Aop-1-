@@ -49,7 +49,7 @@ DATA: 03/08/2026`;
   assert.equal(r.date, '2026-08-03');
   assert.equal(r.suggestedCategoryKey, 'house_materials');
   assert.equal(r.fuel, null);
-  assert.match(r.store, /DEDEMAN/);
+  assert.equal(r.store, 'Dedeman');
 });
 
 test('kilometraj', () => {
@@ -155,7 +155,7 @@ TAL: RON 1696,12
 E 73.09.2026 12:34 0024 242424 oon
 BON NEF ISCA`;
   const r = parseReceipt(text);
-  assert.equal(r.store, 'HORNBACH CENTRALA SRL');
+  assert.equal(r.store, 'Hornbach');
   assert.equal(r.date, '2026-09-23');
   assert.equal(r.total, 1696.12);
   assert.equal(r.cif, 'RO17777320');
@@ -179,7 +179,44 @@ test('bon lung din mai multe poze: magazin sus, total jos', () => {
   const part1 = 'BON NEFISCAL\nHORNBACH CENTRALA SRL\nCUI: RO17777320\n23/9/2026 12:38\nCIMENT 40KG';
   const part2 = 'ADEZIV 89,90\nTAL: RON 1696,12\n23.09.2026 12:34';
   const r = parseReceipt(part1 + '\n--- continuare bon ---\n' + part2, new Date(2026, 8, 24));
-  assert.equal(r.store, 'HORNBACH CENTRALA SRL');
+  assert.equal(r.store, 'Hornbach');
   assert.equal(r.total, 1696.12);
   assert.equal(r.date, '2026-09-23');
+});
+
+const HORNBACH_RETUR = `A Ca 1
+Bl HORNBACU CENTRAT |
+y SERI ADA AnorARA ALA SRL
+/ SECTUR 2 . BUCURES x FO
+MUNICIPIUL BUCUREŞTI
+CUL: RO17777320
+i 23/9/2026 15:3i xo
+x RETUR tt SR
+E iun 5902801327056
+1 BUC. X 129,00
+GER) CLESTE PINT 129,00 A
+TIV: RETUR
+ITAL [1] RON -128,00
+MN RON -129,00
+i BRUT TVA NET
+x 129,00 -22,33  -106,61
+420 73.09.2026 15:23 0008 001004 000938
+BON NEFISCAL
+INCL. re DEEE. RETUR MARFA E
+FL do ZILE GARANTIE PRET J`;
+
+test('bon real de retur Hornbach (OCR cu erori)', () => {
+  const r = parseReceipt(HORNBACH_RETUR, new Date(2026, 8, 24));
+  assert.equal(r.store, 'Hornbach');
+  assert.equal(r.isReturn, true);
+  assert.equal(r.total, -129, 'cifra greșită 128 corectată după frecvență, semn negativ');
+  assert.equal(r.date, '2026-09-23');
+  assert.equal(r.cif, 'RO17777320');
+  assert.equal(r.suggestedCategoryKey, 'house_materials');
+});
+
+test('„RETUR MARFĂ ÎN 90 ZILE” din subsol nu înseamnă retur', () => {
+  const r = parseReceipt('HORNBACH CENTRALA SRL\nTOTAL: RON 1696,12\nRETUR MARFA\nIN 90 ZILE GARANTIE PRET', new Date(2026, 8, 24));
+  assert.equal(r.isReturn, false);
+  assert.equal(r.total, 1696.12);
 });

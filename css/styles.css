@@ -200,3 +200,12 @@ input.check { border: 2px solid var(--warn); background: var(--warn-soft); }
   opacity: 0; pointer-events: none; transition: .25s; z-index: 100; max-width: calc(100vw - 32px);
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: var(--card); border-radius: 12px; padding: 4px; margin-bottom: 12px; }
+.seg button { border: 0; background: none; font-weight: 600; color: var(--muted); }
+.seg button.on { background: var(--accent-soft); color: var(--accent); }
+.filters .grid2 { margin-top: 8px; }
+.item-row { display: grid; grid-template-columns: 1fr 84px; gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.item-row .it-sub { grid-column: 1; }
+.item-row .it-del { grid-column: 2; min-height: 42px; }
+.item-row input, .item-row select { min-height: 38px; padding: 6px 8px; }

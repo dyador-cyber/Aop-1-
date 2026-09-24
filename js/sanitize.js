@@ -5,6 +5,8 @@
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+import { SUBCAT_KEYS } from './items.js';
+
 export const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 const str = (v, max = 200) => (typeof v === 'string' || typeof v === 'number' ? String(v).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').slice(0, max) : '');
@@ -24,6 +26,11 @@ const SCHEMAS = {
     categoryId: id(o.categoryId), projectId: id(o.projectId), vehicleId: id(o.vehicleId),
     notes: str(o.notes, 2000), ocrText: str(o.ocrText, 100000), image: image(o.image),
     extraImages: (Array.isArray(o.extraImages) ? o.extraImages : []).map(image).filter(Boolean).slice(0, 9),
+    isReturn: bool(o.isReturn), returnOf: id(o.returnOf),
+    items: (Array.isArray(o.items) ? o.items : []).slice(0, 300).map((i) => ({
+      id: id(i?.id), name: str(i?.name, 100).trim(), qty: numOrNull(i?.qty, -1e5, 1e5), unitPrice: numOrNull(i?.unitPrice, -1e7, 1e7),
+      amount: numOrNull(i?.amount, -1e7, 1e7), sub: SUBCAT_KEYS.has(i?.sub) ? i.sub : 'other',
+    })).filter((i) => i.id && i.name && i.amount !== null),
     fuel: o.fuel && typeof o.fuel === 'object' ? {
       liters: numOrNull(o.fuel.liters, 0, 1e5), pricePerLiter: numOrNull(o.fuel.pricePerLiter, 0, 1e4),
       km: numOrNull(o.fuel.km, 0, 1e8), fuelType: str(o.fuel.fuelType, 30),
@@ -80,4 +87,14 @@ export function csvCell(v) {
 // Escapare text pentru fișiere calendar (RFC 5545).
 export function icsText(v) {
   return String(v ?? '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n|\r/g, '\\n');
+}
+
+// Regulile învățate din corecturi: { „cheie produs” -> subcategorie }.
+export function sanitizeRules(obj) {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const [k, v] of Object.entries(obj).slice(0, 5000)) {
+    if (typeof k === 'string' && k.length <= 60 && /^[a-z0-9 ]+$/.test(k) && SUBCAT_KEYS.has(v)) out[k] = v;
+  }
+  return out;
 }
