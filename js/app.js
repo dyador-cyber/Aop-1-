@@ -2,7 +2,7 @@ import * as db from './db.js';
 import { parseReceipt, parseOdometer, runQuery, isFuelExpense, normalize } from './parsers.js';
 import { recognize, compressImage as compressRaw } from './ocr.js';
 import { sanitize, sanitizeRules, sanitizeInvSubs, safeImageDataURL, csvCell, icsText } from './sanitize.js';
-import { SUBCATS, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
+import { SUBCATS, GROUPS, groupOf, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
 import { INV_STATUSES, OWNED, statusByKey, syncFromExpense, undoExpense, findSimilar, addMonths, WARRANTY_MONTHS } from './inventory.js';
 import { encryptText, decryptText } from './crypto.js';
 
@@ -296,8 +296,10 @@ function renderProducts() {
   const avgUnit = withUnit.length ? withUnit.reduce((a, i) => a + i.unitPrice, 0) / withUnit.length : null;
   const qtySum = sel.reduce((a, i) => a + (i.qty > 0 ? i.qty : i.qty == null ? 1 : 0), 0);
   const noItems = state.expenses.filter((e) => (!f.month || (e.date || '').startsWith(f.month)) && !(e.items || []).length).length;
-  const rows = SUBCATS.filter((c) => bySub[c.name] !== undefined)
-    .sort((a, b) => bySub[b.name] - bySub[a.name]);
+  const byGroup = {};
+  for (const i of items) { const g = groupOf(i.sub).key; byGroup[g] = (byGroup[g] || 0) + (+i.amount || 0); }
+  const groups = GROUPS.filter((g) => byGroup[g.key] !== undefined).sort((a, b) => byGroup[b.key] - byGroup[a.key]);
+  const pct = (v) => (total ? Math.round(v / total * 100) : 0);
   return `${modeSwitch()}
   <section class="card filters">
     <input id="p-q" type="search" placeholder="Caută produs: unt, ciment, detergent…" value="${esc(f.q)}">
@@ -314,10 +316,15 @@ function renderProducts() {
       <div><b>${money(selTotal / sel.length)}</b><span>medie pe cumpărare</span></div></div>` : ''}
     <ul class="list">${sel.slice(0, 300).map(itemRow).join('') || '<li class="muted pad">Nimic găsit.</li>'}</ul>
   </section>` : ''}
-  <section class="card"><h3>Pe subcategorii: ${money(total)}</h3>
-    ${rows.length ? `<table class="breakdown"><tbody>${rows.map((c) => `<tr class="click" data-action="prod-sub" data-sub="${c.key}">
-      <td><span class="dot" style="background:${esc(c.color)}"></span>${esc(c.name)} <span class="muted small">(${countSub[c.key]})</span></td>
-      <td class="num">${money(bySub[c.name])}</td><td class="num muted">${total ? Math.round(bySub[c.name] / total * 100) : 0}%</td></tr>`).join('')}</tbody></table>`
+  <section class="card"><h3>Pe grupe și subcategorii: ${money(total)}</h3>
+    ${groups.length ? `<table class="breakdown"><tbody>${groups.map((g) => {
+      const subs = SUBCATS.filter((c) => c.group === g.key && bySub[c.name] !== undefined).sort((a, b) => bySub[b.name] - bySub[a.name]);
+      const single = SUBCATS.filter((c) => c.group === g.key).length === 1;
+      return `<tr class="group-row ${single ? 'click' : ''}" ${single ? `data-action="prod-sub" data-sub="${subs[0]?.key}"` : ''}><td><b>${esc(g.name)}</b>${single ? ` <span class="muted small">(${countSub[subs[0]?.key]})</span>` : ''}</td><td class="num"><b>${money(byGroup[g.key])}</b></td><td class="num muted">${pct(byGroup[g.key])}%</td></tr>`
+        + (SUBCATS.filter((c) => c.group === g.key).length > 1 ? subs.map((c) => `<tr class="click sub-row" data-action="prod-sub" data-sub="${c.key}">
+          <td><span class="dot" style="background:${esc(c.color)}"></span>${esc(c.name.replace(/^Materiale – (.)/, (m, ch) => ch.toUpperCase()))} <span class="muted small">(${countSub[c.key]})</span></td>
+          <td class="num">${money(bySub[c.name])}</td><td class="num muted">${pct(bySub[c.name])}%</td></tr>`).join('') : '');
+    }).join('')}</tbody></table>`
       : '<p class="muted">Niciun produs încă. Produsele se citesc automat de pe bonurile noi fotografiate.</p>'}
     ${noItems ? `<p class="muted small">${bonuri(noItems)} fără produse citite (de ex. bonuri de card sau introduse manual).</p>` : ''}
   </section>`;
@@ -1307,9 +1314,9 @@ function exportCSV() {
 
 function exportItemsCSV() {
   const n = (x) => (x == null || x === '' ? '' : String(+x).replace('.', ','));
-  const head = ['Data', 'Magazin', 'Produs', 'Subcategorie', 'Cantitate', 'Pret unitar', 'Suma', 'Categorie bon', 'Proiect', 'Retur'];
+  const head = ['Data', 'Magazin', 'Produs', 'Grupa', 'Subcategorie', 'Cantitate', 'Pret unitar', 'Suma', 'Categorie bon', 'Proiect', 'Retur'];
   const rows = allItems().sort((a, b) => a.e.date.localeCompare(b.e.date)).map((i) => [
-    csvCell(i.e.date), csvCell(i.e.store), csvCell(i.name), csvCell(subcatByKey(i.sub).name), n(i.qty), n(i.unitPrice), n(i.amount),
+    csvCell(i.e.date), csvCell(i.e.store), csvCell(i.name), csvCell(groupOf(i.sub).name.replace(/^\S+\s/, '')), csvCell(subcatByKey(i.sub).name), n(i.qty), n(i.unitPrice), n(i.amount),
     csvCell(catById(i.e.categoryId)?.name), csvCell(projById(i.e.projectId)?.name), i.e.isReturn ? 'da' : ''].join(';'));
   download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `produse-${todayISO()}.csv`);
 }
@@ -1489,7 +1496,7 @@ const actions = {
 };
 
 function doAsk() {
-  state.askResult = state.ask.trim() ? runQuery(state.ask, { ...state, subcats: SUBCATS }) : null;
+  state.askResult = state.ask.trim() ? runQuery(state.ask, { ...state, subcats: SUBCATS, groups: GROUPS }) : null;
   render();
 }
 

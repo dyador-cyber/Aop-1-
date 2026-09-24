@@ -297,16 +297,23 @@ export function runQuery(text, ctx, today = new Date()) {
   // cuvintele din numele produsului + numele subcategoriei lui („Băuturi”, „Scule & unelte”)
   const itemStems = (i) => {
     const sc = (ctx.subcats || []).find((x) => x.key === i.sub);
-    return normalize(`${i.name} ${sc?.name || ''}`).split(/[^a-z0-9]+/).filter((w) => w.length >= 2).map(stem);
+    const g = (ctx.groups || []).find((x) => x.key === sc?.group);
+    return normalize(`${i.name} ${sc?.name || ''} ${g ? g.name + ' ' + g.alias : ''}`).split(/[^a-z0-9]+/).filter((w) => w.length >= 2).map(stem);
   };
   const hitsItem = (i, term) => itemStems(i).some((s) => stemsMatch(s, term.stem));
   for (const term of q.terms) {
     const anyHit = ctx.expenses.some((e) => expenseStems(e, ctx).some((s) => stemsMatch(s, term.stem)))
       || [...ctx.categories, ...ctx.projects, ...ctx.vehicles].some((o) =>
         normalize(`${o.name} ${o.plate || ''}`).split(/[^a-z0-9]+/).some((w) => w.length >= 3 && stemsMatch(stem(w), term.stem)));
-    if (anyHit) matchedTerms.push(term);
+    // un cuvânt care numește o subcategorie de produse („materiale”, „electrice”, „scule”) are prioritate
+    // față de categoria bonului, dacă există produse potrivite
+    const namesSub = [...(ctx.subcats || []).map((sc) => sc.name), ...(ctx.groups || []).map((g) => g.alias)]
+      .some((n) => normalize(n).split(/[^a-z0-9]+/).some((w) => w.length >= 3 && stemsMatch(stem(w), term.stem)));
+    if (namesSub && ctx.expenses.some((e) => (e.items || []).some((i) => hitsItem(i, term)))) itemTerms.push(term);
+    else if (anyHit) matchedTerms.push(term);
     else if (ctx.expenses.some((e) => (e.items || []).some((i) => hitsItem(i, term)))
-      || (ctx.subcats || []).some((sc) => normalize(sc.name).split(/[^a-z0-9]+/).some((w) => w.length >= 3 && stemsMatch(stem(w), term.stem)))) itemTerms.push(term);
+      || [...(ctx.subcats || []), ...(ctx.groups || []).map((g) => ({ name: `${g.name} ${g.alias}` }))]
+        .some((sc) => normalize(sc.name).split(/[^a-z0-9]+/).some((w) => w.length >= 3 && stemsMatch(stem(w), term.stem)))) itemTerms.push(term);
     else unmatched.push(term.word);
   }
   for (const term of matchedTerms) {

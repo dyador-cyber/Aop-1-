@@ -155,3 +155,38 @@ test('aceeași poziție citită diferit în două poze (189,80 / 183,80) nu se d
   const items = parseItems(p1 + '\n--- continuare bon ---\n' + p2);
   assert.deepEqual(items.map((i) => [i.name, i.amount, i.qty]), [['PROIECTOR 30W', 189.8, 2], ['COLIERE400X4,8MM ALB', 31.4, 2], ['WAGO COMPACT CLEMA', 35.5, null]]);
 });
+
+test('priza și cablul sunt „Materiale casă”, proiectorul e la „Scule”', async () => {
+  const { groupOf, SUBCATS, GROUPS } = await import('../js/items.js');
+  const { runQuery } = await import('../js/parsers.js');
+  assert.equal(classifyItem('PRIZĂ SCAME APL.IP66'), 'electrical');
+  assert.equal(groupOf('electrical').key, 'house');
+  assert.equal(groupOf('materials').key, 'house');
+  assert.equal(groupOf(classifyItem('LP PROIE. STV. 2X50W')).key, 'tools');
+  const ctx = { subcats: SUBCATS, groups: GROUPS, categories: [], projects: [], vehicles: [], odometer: [], expenses: [
+    { id: 'x', date: '2026-09-23', total: 889.9, store: 'Hornbach', items: [
+      { id: '1', name: 'PRIZĂ SCAME APL.IP66', amount: 99.9, sub: 'electrical' },
+      { id: '2', name: 'CIMENT 40KG', amount: 35, sub: 'materials' },
+      { id: '3', name: 'LP PROIE. STV. 2X50W', amount: 655, sub: 'tools' },
+      { id: '4', name: 'UNT', amount: 100, sub: 'dairy' }] }] };
+  const today = new Date(2026, 8, 24);
+  assert.equal(runQuery('materiale', ctx, today).total, 134.9);
+  assert.equal(runQuery('electrice', ctx, today).total, 99.9);
+  assert.equal(runQuery('mâncare', ctx, today).total, 100);
+  assert.equal(runQuery('scule', ctx, today).total, 655);
+});
+
+test('„materiale” = doar materialele de pe bon; „casa” = bonurile întregi', async () => {
+  const { SUBCATS, GROUPS } = await import('../js/items.js');
+  const { runQuery } = await import('../js/parsers.js');
+  const ctx = { subcats: SUBCATS, groups: GROUPS, projects: [], vehicles: [], odometer: [],
+    categories: [{ id: 'c', name: 'Casă – materiale construcții' }, { id: 'm', name: 'Mașină – combustibil', isFuel: true }],
+    expenses: [
+      { id: 'x', date: '2026-09-23', total: 754.9, categoryId: 'c', store: 'Hornbach', items: [
+        { id: '1', name: 'PRIZĂ SCAME', amount: 99.9, sub: 'electrical' }, { id: '2', name: 'PROIECTOR', amount: 655, sub: 'tools' }] },
+      { id: 'y', date: '2026-09-20', total: 300, categoryId: 'm', store: 'OMV', fuel: { liters: 40 } }] };
+  const today = new Date(2026, 8, 24);
+  assert.equal(runQuery('materiale', ctx, today).total, 99.9);
+  assert.equal(runQuery('Cât m-a costat casa?', ctx, today).total, 754.9);
+  assert.equal(runQuery('cheltuieli mașină', ctx, today).total, 300);
+});

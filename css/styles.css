@@ -213,3 +213,6 @@ input.check { border: 2px solid var(--warn); background: var(--warn-soft); }
 .checks-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; margin-bottom: 10px; font-size: .9rem; }
 .checks-grid label.check { display: flex; gap: 8px; align-items: center; padding: 4px 0; }
 .checks-grid input { width: 20px; height: 20px; min-height: 0; accent-color: var(--accent); }
+table.breakdown tr.group-row td { padding-top: 10px; }
+table.breakdown tr.sub-row td:first-child { padding-left: 14px; font-size: .92rem; }
+table.breakdown tr.sub-row td { border-top: 0; padding-top: 2px; padding-bottom: 4px; }
