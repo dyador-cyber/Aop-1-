@@ -73,3 +73,18 @@ test('poze suplimentare: doar raster, maxim 9', () => {
   assert.ok(e.extraImages.every((b) => b.type === 'image/jpeg'));
   assert.deepEqual(sanitize('expenses', { id: 'e2', date: '2026-01-01', extraImages: 'nu' }).extraImages, []);
 });
+
+test('inventar: validare strictă', async () => {
+  const { sanitizeInvSubs } = await import('../js/sanitize.js');
+  const x = sanitize('inventory', { id: 'a1', name: '<img src=x onerror=alert(1)>', qty: '3', status: 'hacked', sub: 'nope', purchaseDate: 'ieri',
+    returns: [{ expenseId: '"><x', itemId: 'i' }, { expenseId: 'e1', itemId: 'i1', qty: 2 }], image: new Blob(['<svg/>'], { type: 'image/svg+xml' }) });
+  assert.equal(x.qty, 3);
+  assert.equal(x.status, 'avail');
+  assert.equal(x.sub, 'tools');
+  assert.equal(x.purchaseDate, '');
+  assert.equal(x.image, null);
+  assert.deepEqual(x.returns, [{ expenseId: 'e1', itemId: 'i1', qty: 2 }]);
+  assert.equal(sanitize('inventory', { id: 'a2', name: '' }), null);
+  assert.deepEqual(sanitizeInvSubs(['tools', 'electrical', 'x', '__proto__']), ['tools', 'electrical']);
+  assert.deepEqual(sanitizeInvSubs('nimic'), ['tools']);
+});

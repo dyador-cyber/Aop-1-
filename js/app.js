@@ -1,8 +1,9 @@
 import * as db from './db.js';
 import { parseReceipt, parseOdometer, runQuery, isFuelExpense, normalize } from './parsers.js';
 import { recognize, compressImage as compressRaw } from './ocr.js';
-import { sanitize, sanitizeRules, safeImageDataURL, csvCell, icsText } from './sanitize.js';
+import { sanitize, sanitizeRules, sanitizeInvSubs, safeImageDataURL, csvCell, icsText } from './sanitize.js';
 import { SUBCATS, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
+import { INV_STATUSES, OWNED, statusByKey, syncFromExpense, undoExpense, findSimilar, addMonths, WARRANTY_MONTHS } from './inventory.js';
 import { encryptText, decryptText } from './crypto.js';
 
 const RC = globalThis.ReminderCore;
@@ -18,7 +19,7 @@ const DEFAULT_CATEGORIES = [
   { key: 'health', name: 'Sănătate', color: '#c62828' },
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
-const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects'];
+const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
 
 const state = {
@@ -30,6 +31,9 @@ const state = {
   itemRules: {},
   receiptsMode: 'bills',
   prodFilter: { q: '', month: '', sub: '' },
+  inventory: [],
+  invSubs: ['tools'],
+  invFilter: { q: '', status: 'owned', loc: '' },
 };
 
 // ---------- utilitare ----------
@@ -88,6 +92,8 @@ async function loadAll() {
   state.projects.sort((a, b) => a.name.localeCompare(b.name));
   if (!state.vehicleId || !vehById(state.vehicleId)) state.vehicleId = state.vehicles[0]?.id || '';
   state.itemRules = sanitizeRules((await db.get('meta', 'itemRules'))?.rules);
+  state.invSubs = sanitizeInvSubs((await db.get('meta', 'inventorySettings'))?.subs);
+  state.inventory.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function seed() {
@@ -253,7 +259,8 @@ function modeSwitch() {
   const m = state.receiptsMode;
   return `<div class="seg" role="tablist">
     <button data-action="rmode" data-mode="bills" class="${m === 'bills' ? 'on' : ''}">🧾 Bonuri</button>
-    <button data-action="rmode" data-mode="products" class="${m === 'products' ? 'on' : ''}">📊 Produse</button></div>`;
+    <button data-action="rmode" data-mode="products" class="${m === 'products' ? 'on' : ''}">📊 Produse</button>
+    <button data-action="rmode" data-mode="inventory" class="${m === 'inventory' ? 'on' : ''}">🧰 Inventar</button></div>`;
 }
 
 // Toate produsele de pe bonuri, cu bonul din care provin.
@@ -318,6 +325,7 @@ function renderProducts() {
 
 function renderReceipts() {
   if (state.receiptsMode === 'products') return renderProducts();
+  if (state.receiptsMode === 'inventory') return renderInventory();
   const list = filteredExpenses();
   const total = list.reduce((s, e) => s + (+e.total || 0), 0);
   const f = state.filter;
@@ -452,6 +460,11 @@ function renderSettings() {
     <ul class="list">${state.projects.map((p) => `<li class="row" data-action="edit-project" data-id="${esc(p.id)}"><div class="grow">📁 ${esc(p.name)}</div></li>`).join('')}</ul></section>
   <section class="card"><div class="row-flex"><h3 class="grow">Mașini</h3><button data-action="new-vehicle">+ Adaugă</button></div>
     <ul class="list">${state.vehicles.map((v) => `<li class="row" data-action="edit-vehicle" data-id="${esc(v.id)}"><div class="grow">🚗 ${esc(v.name)} <span class="muted">${esc(v.plate || '')}</span></div></li>`).join('')}</ul></section>
+  <section class="card"><h3>🧰 Inventar</h3>
+    <p class="small muted">Produsele din aceste subcategorii intră automat în inventar când salvezi bonul:</p>
+    <div class="checks-grid">${SUBCATS.filter((c) => c.key !== 'other').map((c) => `<label class="check"><input type="checkbox" data-action="inv-sub" data-sub="${c.key}" ${state.invSubs.includes(c.key) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('')}</div>
+    <button data-action="export-inv-csv">⬇️ CSV inventar</button>
+  </section>
   <section class="card"><h3>Notificări</h3>
     <p class="small">Stare: <b>${esc(perm)}</b>. Aplicația verifică expirările la fiecare deschidere
     (și în fundal, pe Android, dacă este instalată pe ecranul principal). Pentru siguranță maximă, adaugă expirările și în calendarul telefonului (.ics).</p>
@@ -739,7 +752,12 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       Object.assign(exp, readExpenseForm(form, exp));
       openExpense(exp, { runOcr: true, ocrSource: f });
     });
-    $('#exp-del', root)?.addEventListener('click', async () => { if (await remove('expenses', exp.id, 'bonul')) closeModal(); });
+    $('#exp-del', root)?.addEventListener('click', async () => {
+      const old = state.expenses.find((e) => e.id === exp.id);
+      if (!(await remove('expenses', exp.id, 'bonul'))) return;
+      if (old) await applyInventory(undoExpense(old, state.inventory));
+      closeModal();
+    });
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const data = readExpenseForm(form, exp);
@@ -747,7 +765,9 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       await learnSubcats(exp.items.filter((i) => i.manualSub));
       if (!(await save('expenses', data))) return;
       closeModal();
-      toast('Bon salvat ✔');
+      const saved = state.expenses.find((e) => e.id === data.id);
+      const inv = saved ? await syncInventory(saved) : null;
+      toast('Bon salvat ✔' + (inv || ''));
     });
   });
 }
@@ -779,6 +799,205 @@ function readExpenseForm(form, exp) {
     createdAt: exp.createdAt || Date.now(),
     updatedAt: Date.now(),
   };
+}
+
+// ---------- inventar ----------
+async function applyInventory(out) {
+  if (!out.puts.length && !out.dels.length) return;
+  for (const id of out.dels) await db.del('inventory', id);
+  for (const x of out.puts) { const c = sanitize('inventory', x); if (c) await db.put('inventory', c); }
+  await loadAll();
+  render();
+}
+
+// După salvarea unui bon: sculele noi intră în inventar, retururile le scot. Returnează textul pentru mesaj.
+async function syncInventory(e) {
+  const out = syncFromExpense(e, state.inventory, { subs: state.invSubs, uid: db.uid });
+  await applyInventory(out);
+  const parts = [];
+  if (out.added.length) {
+    const dup = out.added.flatMap((a) => findSimilar(a.name, state.inventory, { excludeIds: out.added.map((x) => x.id) }).slice(0, 1).map((d) => d.name));
+    parts.push(` · ${out.added.length} ${out.added.length === 1 ? 'sculă adăugată' : 'scule adăugate'} în inventar${dup.length ? ` (ai deja: ${dup.join(', ')})` : ''}`);
+  }
+  if (out.returned.length) parts.push(` · returnat din inventar: ${out.returned.map((x) => x.name).join(', ')}`);
+  if (out.unmatched.length) parts.push(` · negăsit în inventar: ${out.unmatched.join(', ')}`);
+  return parts.join('');
+}
+
+function invFiltered() {
+  const f = state.invFilter;
+  const q = normalize(f.q.trim());
+  return state.inventory.filter((x) =>
+    (f.status === 'all' || (f.status === 'owned' ? OWNED.has(x.status) : x.status === f.status)) &&
+    (!f.loc || (x.location || '') === (f.loc === '—' ? '' : f.loc)) &&
+    (!q || normalize(`${x.name} ${x.location} ${x.lentTo} ${x.notes} ${x.store}`).includes(q)));
+}
+
+function invRow(x) {
+  const st = statusByKey(x.status);
+  const today = todayISO();
+  const warranty = x.warrantyUntil && x.warrantyUntil >= today && OWNED.has(x.status);
+  return `<li class="row" data-action="edit-inv" data-id="${esc(x.id)}">
+    ${x.image ? `<img class="thumb" src="${imgURL(x)}" alt="">` : `<div class="thumb ph">${esc(subcatByKey(x.sub).key === 'tools' ? '🔧' : '📦')}</div>`}
+    <div class="grow"><div class="title">${esc(x.name)}${x.qty > 1 ? ` <span class="muted">×${esc(x.qty)}</span>` : ''}</div>
+    <div class="sub">${x.purchaseDate ? fmtDate(x.purchaseDate) : 'fără dată'}${x.store ? ' · ' + esc(x.store) : ''}${x.price ? ' · ' + money(x.price) : ''}${warranty ? ` · 🛡️ garanție până ${fmtDate(x.warrantyUntil)}` : ''}
+    ${x.status === 'lent' && x.lentTo ? ` · la <b>${esc(x.lentTo)}</b>${x.lentDate ? ' din ' + fmtDate(x.lentDate) : ''}` : ''}</div></div>
+    ${x.status !== 'avail' ? `<span class="badge ${st.cls}">${esc(st.name)}</span>` : ''}</li>`;
+}
+
+function renderInventory() {
+  const f = state.invFilter;
+  const list = invFiltered();
+  const owned = state.inventory.filter((x) => OWNED.has(x.status));
+  const count = owned.reduce((a, x) => a + (x.qty || 1), 0);
+  const value = owned.reduce((a, x) => a + (x.price || 0) * (x.qty || 1), 0);
+  const lent = owned.filter((x) => x.status === 'lent');
+  const inWarranty = owned.filter((x) => x.warrantyUntil && x.warrantyUntil >= todayISO()).length;
+  const locs = [...new Set(state.inventory.map((x) => x.location || ''))].sort();
+  const groups = {};
+  for (const x of list) (groups[x.location || ''] ||= []).push(x);
+  const subsNames = state.invSubs.map((k) => subcatByKey(k).name).join(', ');
+  return `${modeSwitch()}
+  <section class="card">
+    <div class="kpis">
+      <div><b>${count}</b><span>bucăți deținute</span></div>
+      <div><b>${money(value)}</b><span>valoare de cumpărare</span></div>
+      <div><b>${lent.length}</b><span>împrumutate</span></div>
+      <div><b>${inWarranty}</b><span>în garanție</span></div>
+    </div>
+    ${lent.length ? `<p class="small">🤝 Împrumutate: ${lent.map((x) => `<b>${esc(x.name)}</b> → ${esc(x.lentTo || '?')}`).join(' · ')}</p>` : ''}
+    <div class="row-flex wrap"><button class="primary" data-action="new-inv">+ Adaugă sculă</button>
+      <button data-action="inv-scan" title="Adaugă în inventar sculele de pe bonurile salvate deja">🔄 Din bonurile salvate</button></div>
+    <p class="muted small">Se adaugă automat din bonuri: ${esc(subsNames)} (modifici în Setări). Retururile le scot din inventar.</p>
+  </section>
+  <section class="card filters">
+    <input id="i-q" type="search" placeholder="Caută sculă, loc, persoană…" value="${esc(f.q)}">
+    <div class="grid2">
+      <select id="i-status">
+        <option value="owned" ${f.status === 'owned' ? 'selected' : ''}>Ce am (toate deținute)</option>
+        ${INV_STATUSES.map((s2) => `<option value="${s2.key}" ${f.status === s2.key ? 'selected' : ''}>${esc(s2.name)}</option>`).join('')}
+        <option value="all" ${f.status === 'all' ? 'selected' : ''}>Toate, inclusiv returnate</option>
+      </select>
+      <select id="i-loc"><option value="">Toate locurile</option>${locs.map((l) => `<option value="${esc(l || '—')}" ${f.loc === (l || '—') ? 'selected' : ''}>${esc(l || 'Fără loc')}</option>`).join('')}</select>
+    </div>
+  </section>
+  ${Object.keys(groups).sort().map((loc) => `<section class="card"><h3>📍 ${esc(loc || 'Fără loc stabilit')} <span class="muted small">(${groups[loc].length})</span></h3>
+    <ul class="list">${groups[loc].map(invRow).join('')}</ul></section>`).join('')
+    || `<p class="muted center">${state.inventory.length ? 'Nimic găsit.' : 'Inventarul e gol. Fotografiază bonuri cu scule sau adaugă manual sculele pe care le ai.'}</p>`}`;
+}
+
+function openInventory(x) {
+  const isNew = !state.inventory.some((i) => i.id === x.id);
+  const locs = [...new Set(['Garaj', 'Casă', 'Mașină', 'Șantier', 'Atelier', 'Magazie', ...state.inventory.map((i) => i.location).filter(Boolean)])];
+  const exp = x.expenseId ? state.expenses.find((e) => e.id === x.expenseId) : null;
+  openModal(isNew ? 'Sculă nouă' : 'Sculă', `
+  <form id="inv-form" class="form">
+    ${x.image ? `<img class="preview" src="${imgURL(x)}" alt="">` : ''}
+    <label>Denumire<input name="name" value="${esc(x.name)}" required placeholder="ex.: Bormașină Bosch"></label>
+    <div id="inv-dup" class="ocr hidden"></div>
+    <div class="grid2">
+      <label>Bucăți<input name="qty" inputmode="numeric" value="${esc(x.qty ?? 1)}"></label>
+      <label>Unde se află<input name="location" list="inv-locs" value="${esc(x.location || '')}" placeholder="Garaj"></label>
+    </div>
+    <datalist id="inv-locs">${locs.map((l) => `<option value="${esc(l)}">`).join('')}</datalist>
+    <label>Stare<select name="status">${INV_STATUSES.map((s2) => `<option value="${s2.key}" ${s2.key === x.status ? 'selected' : ''}>${esc(s2.name)}</option>`).join('')}</select></label>
+    <div id="lent-box" class="grid2 ${x.status === 'lent' ? '' : 'hidden'}">
+      <label>Împrumutată lui<input name="lentTo" value="${esc(x.lentTo || '')}"></label>
+      <label>Din data<input name="lentDate" type="date" value="${esc(x.lentDate || '')}"></label>
+    </div>
+    <div class="grid2">
+      <label>Cumpărată la<input name="purchaseDate" type="date" value="${esc(x.purchaseDate || '')}"></label>
+      <label>Preț / buc. (lei)<input name="price" inputmode="decimal" value="${esc(x.price ?? '')}"></label>
+    </div>
+    <div class="grid2">
+      <label>Magazin<input name="store" value="${esc(x.store || '')}"></label>
+      <label>Garanție până la<input name="warrantyUntil" type="date" value="${esc(x.warrantyUntil || '')}"></label>
+    </div>
+    <label>Subcategorie<select name="sub">${SUBCATS.map((c) => `<option value="${c.key}" ${c.key === x.sub ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+    <label>Notițe (serie, accesorii, baterii…)<textarea name="notes" rows="2">${esc(x.notes || '')}</textarea></label>
+    ${exp ? `<p><button type="button" class="link" data-action="edit-expense" data-id="${esc(exp.id)}">🧾 Vezi bonul (${fmtDate(exp.date)} · ${esc(exp.store || '')} · ${money(exp.total)})</button></p>` : ''}
+    ${(x.returns || []).length ? `<p class="muted small">↩️ Returnat ${x.returns.reduce((a, r) => a + r.qty, 0)} buc.</p>` : ''}
+    <div class="actions">
+      ${isNew ? '' : '<button type="button" class="danger" id="inv-del">Șterge</button>'}
+      <button type="button" id="inv-photo">📷 ${x.image ? 'Schimbă poza' : 'Poză'}</button>
+      <button class="primary">Salvează</button>
+    </div>
+  </form>`, (root) => {
+    const form = $('#inv-form', root);
+    form.status.addEventListener('change', () => {
+      $('#lent-box', root).classList.toggle('hidden', form.status.value !== 'lent');
+      if (form.status.value === 'lent' && !form.lentDate.value) form.lentDate.value = todayISO();
+    });
+    const dupCheck = () => {
+      const d = findSimilar(form.name.value, state.inventory, { excludeIds: [x.id] });
+      const box = $('#inv-dup', root);
+      box.classList.toggle('hidden', !d.length);
+      box.textContent = d.length ? `⚠️ Ai deja: ${d.slice(0, 3).map((i) => `${i.name}${i.location ? ' (' + i.location + ')' : ''}`).join(', ')}` : '';
+    };
+    form.name.addEventListener('change', dupCheck);
+    if (isNew && x.name) dupCheck();
+    form.purchaseDate.addEventListener('change', () => {
+      if (!form.warrantyUntil.value && form.purchaseDate.value) form.warrantyUntil.value = addMonths(form.purchaseDate.value, WARRANTY_MONTHS);
+    });
+    $('#inv-photo', root).addEventListener('click', async () => {
+      const f = await pickFile();
+      if (!f) return;
+      const img = await compressImage(f, 1200);
+      if (!img) return;
+      Object.assign(x, readInv(form, x), { image: img });
+      openInventory(x);
+    });
+    $('#inv-del', root)?.addEventListener('click', async () => { if (await remove('inventory', x.id, 'scula din inventar')) closeModal(); });
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      if (!(await save('inventory', readInv(form, x)))) return;
+      closeModal();
+      toast('Salvat în inventar ✔');
+    });
+  });
+}
+
+function readInv(form, x) {
+  const status = form.status.value;
+  return {
+    ...x,
+    name: form.name.value.trim(),
+    qty: Math.max(0, Math.round(toNum(form.qty.value) ?? 1)),
+    location: form.location.value.trim(),
+    status,
+    lentTo: status === 'lent' ? form.lentTo.value.trim() : '',
+    lentDate: status === 'lent' ? form.lentDate.value : '',
+    purchaseDate: form.purchaseDate.value,
+    price: toNum(form.price.value),
+    store: form.store.value.trim(),
+    warrantyUntil: form.warrantyUntil.value,
+    sub: form.sub.value,
+    notes: form.notes.value.trim(),
+    edited: true,
+    createdAt: x.createdAt || Date.now(),
+  };
+}
+
+// Adaugă în inventar sculele de pe bonurile salvate înainte (cumpărările întâi, apoi retururile).
+async function scanInventory() {
+  const sorted = state.expenses.slice().sort((a, b) => (a.isReturn - b.isReturn) || a.date.localeCompare(b.date));
+  let added = 0;
+  let returned = 0;
+  for (const e of sorted) {
+    const out = syncFromExpense(e, state.inventory, { subs: state.invSubs, uid: db.uid });
+    added += out.added.length;
+    returned += out.returned.length;
+    await applyInventory(out);
+  }
+  toast(added || returned ? `Inventar actualizat: +${added} adăugate, ${returned} returnate` : 'Nimic nou de adăugat din bonuri');
+}
+
+function exportInventoryCSV() {
+  const n = (v) => (v == null || v === '' ? '' : String(+v).replace('.', ','));
+  const head = ['Denumire', 'Bucati', 'Loc', 'Stare', 'Imprumutata lui', 'Din data', 'Data cumparare', 'Pret/buc', 'Magazin', 'Garantie pana la', 'Subcategorie', 'Note'];
+  const rows = state.inventory.map((x) => [csvCell(x.name), n(x.qty), csvCell(x.location), csvCell(statusByKey(x.status).name), csvCell(x.lentTo), csvCell(x.lentDate),
+    csvCell(x.purchaseDate), n(x.price), csvCell(x.store), csvCell(x.warrantyUntil), csvCell(subcatByKey(x.sub).name), csvCell(x.notes)].join(';'));
+  download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `inventar-${todayISO()}.csv`);
 }
 
 // Ține minte subcategoriile alese manual: data viitoare același produs e încadrat la fel.
@@ -1235,6 +1454,17 @@ const actions = {
   },
   'export-csv': exportCSV,
   'export-items-csv': exportItemsCSV,
+  'export-inv-csv': exportInventoryCSV,
+  'new-inv': () => openInventory({ id: db.uid(), name: '', qty: 1, status: 'avail', sub: 'tools', location: '', purchaseDate: '', returns: [] }),
+  'edit-inv': (el) => openInventory({ ...state.inventory.find((x) => x.id === el.dataset.id) }),
+  'inv-scan': scanInventory,
+  'inv-sub': async (el) => {
+    const subs = new Set(state.invSubs);
+    if (el.checked) subs.add(el.dataset.sub); else subs.delete(el.dataset.sub);
+    state.invSubs = sanitizeInvSubs([...subs]);
+    await db.put('meta', { id: 'inventorySettings', subs: state.invSubs });
+    render();
+  },
   rmode: (el) => { state.receiptsMode = el.dataset.mode; render(); },
   'prod-sub': (el) => { state.prodFilter.sub = state.prodFilter.sub === el.dataset.sub ? '' : el.dataset.sub; state.view = 'receipts'; state.receiptsMode = 'products'; render(); },
   'export-json': exportJSON,
@@ -1277,6 +1507,7 @@ document.addEventListener('input', (ev) => {
   const id = ev.target.id;
   if (id === 'f-q') { state.filter.q = ev.target.value; rerenderKeepFocus(id); }
   if (id === 'p-q') { state.prodFilter.q = ev.target.value; rerenderKeepFocus(id); }
+  if (id === 'i-q') { state.invFilter.q = ev.target.value; rerenderKeepFocus(id); }
 });
 document.addEventListener('change', (ev) => {
   const id = ev.target.id;
@@ -1285,6 +1516,8 @@ document.addEventListener('change', (ev) => {
   else if (id === 'f-month') state.filter.month = ev.target.value;
   else if (id === 'p-month') state.prodFilter.month = ev.target.value;
   else if (id === 'p-sub') state.prodFilter.sub = ev.target.value;
+  else if (id === 'i-status') state.invFilter.status = ev.target.value;
+  else if (id === 'i-loc') state.invFilter.loc = ev.target.value;
   else if (id === 'veh-select') state.vehicleId = ev.target.value;
   else if (ev.target.name === 'projectId' && ev.target.closest('#exp-form')) { try { localStorage.setItem('lastProject', ev.target.value); } catch { /* ignoră */ } return; }
   else return;

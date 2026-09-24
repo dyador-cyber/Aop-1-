@@ -1,7 +1,7 @@
 // Mic strat peste IndexedDB. Datele rămân pe telefon.
 export const DB_NAME = 'bonuri-db';
-export const DB_VERSION = 1;
-export const STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'meta'];
+export const DB_VERSION = 2; // v2: inventar
+export const STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'meta', 'inventory'];
 
 let dbPromise;
 

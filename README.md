@@ -5,6 +5,7 @@ Aplicație pentru telefon (PWA – se instalează din browser, merge și offline
 - **fotografiezi bonurile** → aplicația citește automat (OCR) magazinul, data, totalul, CIF-ul și, la benzinărie, **litrii și prețul pe litru**;
 - **atribui fiecare bon** unei **categorii** (Alimente, Casă – materiale, Casă – manoperă, Mașină – combustibil, Mașină – service, Mașină – asigurări…) și, opțional, unui **proiect** (ex.: „Construcție casă”) și unei **mașini**;
 - **produsele de pe bon** sunt extrase automat și încadrate pe subcategorii (scule, materiale de construcții, electrice, instalații, vopsele, grădină, curățenie – mături, detergenți –, igienă, lactate – unt, ouă –, carne, panificație, fructe și legume, băuturi, dulciuri, alimente de bază, auto, animale). Corectezi o subcategorie o dată, iar aplicația ține minte. În **Bonuri → 📊 Produse** vezi totalul pe subcategorii și cauți orice produs (ex. „unt”: total, cantitate, preț mediu);
+- **inventarul sculelor** (Bonuri → 🧰 Inventar): sculele de pe bonuri intră automat, cu data, prețul, magazinul, garanția (2 ani) și legătura spre bon; retururile le scot automat. Adaugi manual sculele pe care le aveai, cu poză, loc (garaj, mașină, șantier…) și stare (disponibilă, **împrumutată cui**, în reparație, defectă, pierdută). Primești avertisment „ai deja…” la o sculă asemănătoare. Din Setări alegi ce subcategorii intră în inventar;
 - **retururile** sunt recunoscute automat (total negativ, „*** RETUR ***”), se scad din cheltuieli și se leagă de bonul original;
 - **întrebi** în limbaj natural: *„Cât m-a costat casa?”*, *„Cât am dat pe benzină anul acesta?”*, *„Cheltuieli mașină luna trecută”*, *„Dedeman martie”*, *„Băuturi luna asta”*, *„Unt”*, *„Scule”* → primești totalul, defalcarea pe categorii/proiecte și lista bonurilor;
 - introduci **kilometrajul** cu poză la bord (OCR pe cifre) sau manual → consum L/100 km, km parcurși;
@@ -54,6 +55,7 @@ js/app.js             ecrane, formulare, export, notificări
 js/parsers.js         citirea bonurilor / kilometrajului, interpretarea întrebărilor
 js/reminder-core.js   calculul notificărilor (folosit și de service worker)
 js/db.js              baza de date locală (IndexedDB)
+js/inventory.js       inventarul (sincronizare cu bonurile, retururi)
 js/items.js           produsele de pe bon, subcategorii
 js/preprocess.js      decuparea bonului și eliminarea umbrelor înainte de OCR
 js/sanitize.js        validarea datelor, protecții CSV/ICS
