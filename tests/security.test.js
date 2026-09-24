@@ -88,3 +88,9 @@ test('inventar: validare strictă', async () => {
   assert.deepEqual(sanitizeInvSubs(['tools', 'electrical', 'x', '__proto__']), ['tools', 'electrical']);
   assert.deepEqual(sanitizeInvSubs('nimic'), ['tools']);
 });
+
+test('reguli magazin: doar CUI valid -> nume scurt', async () => {
+  const { sanitizeStoreRules } = await import('../js/sanitize.js');
+  assert.deepEqual(sanitizeStoreRules({ RO17777320: 'Hornbach', '__proto__': 'x', 'abc': 'y', '1234567': '  <b>Test</b>  ', RO1: 'z', RO7654321: '' }),
+    { RO17777320: 'Hornbach', 1234567: '<b>Test</b>' });
+});

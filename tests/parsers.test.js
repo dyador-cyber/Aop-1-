@@ -220,3 +220,22 @@ test('„RETUR MARFĂ ÎN 90 ZILE” din subsol nu înseamnă retur', () => {
   assert.equal(r.isReturn, false);
   assert.equal(r.total, 1696.12);
 });
+
+test('magazin ilizibil: nume cu litere greșite, CUI cunoscut, regulă învățată', async () => {
+  const { findBrand, brandFromCif } = await import('../js/parsers.js');
+  assert.equal(parseReceipt('BON NEFISCAL\n/ ORBACH CENTRALA SRL\nSECTOR 2').store, 'Hornbach');
+  assert.equal(parseReceipt('H0RNBACH CENTRALA SRL').store, 'Hornbach');
+  assert.equal(parseReceipt('zz ilizibil SRL\nCUI: ROV7777320').store, 'Hornbach');
+  assert.equal(parseReceipt('zz ilizibil SRL\nCUL: RO1777 7320').store, 'Hornbach');
+  assert.equal(parseReceipt('DEDEMA SRL\nx').store, 'Dedeman');
+  assert.equal(parseReceipt('ANTET ILIZIBIL SRL\nCUI RO1234567', new Date(), { storeRules: { RO1234567: 'Ferma Popescu' } }).store, 'Ferma Popescu');
+  assert.equal(parseReceipt('MEGA TEST SRL\nCUI RO1234567').store, 'MEGA TEST SRL');
+  // fără potriviri false
+  assert.equal(findBrand('CORBACI LTD'), '');
+  assert.equal(findBrand('PROFIL ALUMINIU'), '');
+  assert.equal(brandFromCif('TOTAL 1696,12 CASA 24 ACCUM 0036007'), '');
+});
+
+test('CUI pe un rând, data pe rândul următor: nu se lipesc', () => {
+  assert.equal(parseReceipt('ANTET ILIZIBIL\nCUI: RO1234567\n24.09.2026 11:00\nTOTAL 89,00', new Date(2026, 8, 24), { storeRules: { RO1234567: 'Ferma Popescu' } }).store, 'Ferma Popescu');
+});
