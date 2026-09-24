@@ -239,3 +239,20 @@ test('magazin ilizibil: nume cu litere greșite, CUI cunoscut, regulă învăța
 test('CUI pe un rând, data pe rândul următor: nu se lipesc', () => {
   assert.equal(parseReceipt('ANTET ILIZIBIL\nCUI: RO1234567\n24.09.2026 11:00\nTOTAL 89,00', new Date(2026, 8, 24), { storeRules: { RO1234567: 'Ferma Popescu' } }).store, 'Ferma Popescu');
 });
+
+test('retur recunoscut și din citiri proaste; bonurile normale nu devin retur', () => {
+  const today = new Date(2026, 8, 24);
+  // „RETUR” citit greșit, fără minus la total, dar cu „-1 BUC” și semnătura delegatului
+  const bad = 'ilizibil SRL\n*** RATUR ***\n-1 BUC. X 129,00\nCLESTE PINI 129,00 A\nTOTAL [1] RON 129,00\nNUME SI SEMNATURA ANGAJAT/DELEGAT';
+  let r = parseReceipt(bad, today);
+  assert.equal(r.isReturn, true);
+  assert.equal(r.total, -129);
+  // „MOTIV: RETUR” citit „MOTIV: RETOR”
+  assert.equal(parseReceipt('X SRL\nMOTIV: RETOR\nTOTAL 50,00', today).isReturn, true);
+  // bon normal cu „RETUR MARFĂ ÎN 90 ZILE” și o reducere negativă: nu e retur
+  r = parseReceipt('HORNBACH SRL\n1 BUC x 20,00 LEI\nPRODUS 20,00 A\nREDUCERE -2,00\nTOTAL 18,00\nRETUR MARFA\nIN 90 ZILE', today);
+  assert.equal(r.isReturn, false);
+  assert.equal(r.total, 18);
+  // rețea electrică / „reteta” nu declanșează
+  assert.equal(parseReceipt('X SRL\nCABLU RETEA 20,00\nRETETA 10,00\nTOTAL 30,00', today).isReturn, false);
+});

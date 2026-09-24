@@ -97,10 +97,20 @@ export function findBrand(text) {
 // Bon de retur / stornare. Atenție: bonurile normale au în subsol „RETUR MARFĂ ÎN 90 ZILE”,
 // deci nu ajunge simplul cuvânt „retur”.
 export function isReturnText(text) {
-  const lines = String(text || '').split(/\r?\n/).map((l) => normalize(l).replace(/[^a-z0-9: ]+/g, ' ').trim());
-  return lines.some((l) => /^(bon (de )?)?(retur|storno|stornare|restituire|refund)$/.test(l.replace(/\s+/g, ' '))
-    || /\bmotiv\s*:?\s*retur/.test(l) || /\bstorn(o|are|at)\b/.test(l) || /\b(bon|nota) (de )?retur\b/.test(l) || /\brefund\b/.test(l)
+  const lines = String(text || '').split(/\r?\n/).map((l) => normalize(l).replace(/[^a-z0-9: -]+/g, ' ').replace(/\s+/g, ' ').trim());
+  // „retur” citit cu o literă greșită („ratur”, „retor”, „rctur”), dar nu „retur marfă” din subsolul bonurilor normale
+  const returWord = (l) => !/retur marfa|marfa/.test(l) && l.split(/[\s:-]+/).some((t) => t.length === 5 && levenshtein(t, 'retur') <= 1 && t !== 'retea');
+  const strong = lines.some((l) => /^(bon (de )?)?(retur|storno|stornare|restituire|refund)$/.test(l)
+    || /\bmotiv\s*:?\s*\S{0,2}\s*r\w{3,4}\b/.test(l) || /\bstorn(o|are|at)\b/.test(l) || /\b(bon|nota) (de )?retur\b/.test(l) || /\brefund\b/.test(l)
     || /^\W*x*\s*retur\b(?! marfa)/.test(l));
+  if (strong) return true;
+  // semne mai slabe: cel puțin două dintre ele
+  let score = 0;
+  if (lines.some(returWord)) score++;
+  if (lines.some((l) => /(^|\s)-\s?\d+([.,]\d{1,3})?\s*(buc|bc|kg|pachet|set)\b/.test(l))) score++; // „-1 BUC”
+  if (lines.filter((l) => /-\s?\d{1,3}(?:[ .]\d{3})*[.,]\d{2}\b/.test(l)).length >= 2) score++; // mai multe sume negative
+  if (lines.some((l) => /semnatura\s*(angajat|delegat)|angajat\s*delegat/.test(l))) score++; // doar pe retururi
+  return score >= 2;
 }
 
 const STORE_HINTS = [
