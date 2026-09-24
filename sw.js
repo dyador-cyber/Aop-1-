@@ -1,10 +1,10 @@
 // Service worker: funcționare offline + verificare expirări în fundal.
 importScripts('js/reminder-core.js');
 
-const CACHE = 'bonuri-v1';
+const CACHE = 'bonuri-v2';
 const SHELL = [
   './', 'index.html', 'css/styles.css', 'js/app.js', 'js/db.js', 'js/parsers.js', 'js/ocr.js',
-  'js/reminder-core.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
+  'js/reminder-core.js', 'js/sanitize.js', 'js/crypto.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
 self.addEventListener('install', (e) => {
@@ -24,12 +24,14 @@ self.addEventListener('fetch', (e) => {
   if (url.origin === self.location.origin) {
     // rețea întâi (ca să primești actualizările), cache dacă ești offline
     e.respondWith(fetch(req).then((res) => {
-      const copy = res.clone();
-      caches.open(CACHE).then((c) => c.put(req, copy));
+      if (res.ok && res.type === 'basic') {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(req, copy));
+      }
       return res;
     }).catch(() => caches.match(req).then((r) => r || caches.match('index.html'))));
-  } else if (/jsdelivr|tessdata|projectnaptha/.test(url.host)) {
-    // fișierele OCR sunt mari și nu se schimbă: cache întâi
+  } else if (url.origin === 'https://cdn.jsdelivr.net' && url.pathname.startsWith('/npm/@tesseract.js-data/')) {
+    // datele de limbă pentru OCR sunt mari și nu se schimbă: cache întâi
     e.respondWith(caches.open('bonuri-runtime').then((c) => c.match(req).then((hit) => hit || fetch(req).then((res) => {
       if (res.ok) c.put(req, res.clone());
       return res;

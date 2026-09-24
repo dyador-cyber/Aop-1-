@@ -1,6 +1,8 @@
 import * as db from './db.js';
 import { parseReceipt, parseOdometer, runQuery, isFuelExpense } from './parsers.js';
-import { recognize, compressImage } from './ocr.js';
+import { recognize, compressImage as compressRaw } from './ocr.js';
+import { sanitize, safeImageDataURL, csvCell, icsText } from './sanitize.js';
+import { encryptText, decryptText } from './crypto.js';
 
 const RC = globalThis.ReminderCore;
 
@@ -15,6 +17,7 @@ const DEFAULT_CATEGORIES = [
   { key: 'health', name: 'Sănătate', color: '#c62828' },
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
+const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
 
 const state = {
@@ -32,7 +35,7 @@ const money = (n) => new Intl.NumberFormat('ro-RO', { style: 'currency', currenc
 const num = (n, d = 2) => new Intl.NumberFormat('ro-RO', { maximumFractionDigits: d }).format(+n || 0);
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const bonuri = (n) => `${n} ${n === 1 ? 'bon' : 'bonuri'}`;
-const fmtDate = (s) => (s ? s.split('-').reverse().join('.') : '—');
+const fmtDate = (s) => (s ? esc(String(s).split('-').reverse().join('.')) : '—');
 const catById = (id) => state.categories.find((c) => c.id === id);
 const projById = (id) => state.projects.find((p) => p.id === id);
 const vehById = (id) => state.vehicles.find((v) => v.id === id);
@@ -56,6 +59,10 @@ function imgURL(obj) {
   return urlCache.get(obj.id).url;
 }
 
+async function compressImage(file, maxSide) {
+  try { return await compressRaw(file, maxSide); } catch (e) { toast(e.message); return null; }
+}
+
 function pickFile({ capture = true } = {}) {
   return new Promise((resolve) => {
     const input = document.createElement('input');
@@ -69,8 +76,8 @@ function pickFile({ capture = true } = {}) {
 
 // ---------- date ----------
 async function loadAll() {
-  for (const s of ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects']) {
-    state[s] = await db.getAll(s);
+  for (const s of DATA_STORES) {
+    state[s] = (await db.getAll(s)).map((o) => sanitize(s, o)).filter(Boolean);
   }
   state.categories.sort((a, b) => (a.order ?? 99) - (b.order ?? 99) || a.name.localeCompare(b.name));
   state.projects.sort((a, b) => a.name.localeCompare(b.name));
@@ -85,7 +92,14 @@ async function seed() {
   await db.put('projects', { id: db.uid(), name: 'Construcție casă', notes: '' });
 }
 
-async function save(store, obj) { await db.put(store, obj); await loadAll(); render(); }
+async function save(store, obj) {
+  const clean = sanitize(store, obj);
+  if (!clean) { toast('Date invalide – verifică câmpurile'); return false; }
+  await db.put(store, clean);
+  await loadAll();
+  render();
+  return true;
+}
 async function remove(store, id, what = 'elementul') {
   if (!confirm(`Ștergi ${what}?`)) return false;
   await db.del(store, id);
@@ -385,11 +399,11 @@ function openExpense(exp, { runOcr = false } = {}) {
   const cat = catById(exp.categoryId);
   const html = `
   <form id="exp-form" class="form">
-    ${exp.image ? `<a href="${imgURL(exp)}" target="_blank"><img class="preview" src="${imgURL(exp)}" alt="bon"></a>` : ''}
+    ${exp.image ? `<a href="${imgURL(exp)}" target="_blank" rel="noopener noreferrer"><img class="preview" src="${imgURL(exp)}" alt="bon"></a>` : ''}
     <div id="ocr-status" class="ocr ${runOcr ? '' : 'hidden'}">🔍 Citesc bonul… <progress max="1" value="0"></progress></div>
     <div class="grid2">
       <label>Data<input name="date" type="date" value="${esc(exp.date)}" required></label>
-      <label>Total (lei)<input name="total" inputmode="decimal" value="${exp.total ?? ''}" required></label>
+      <label>Total (lei)<input name="total" inputmode="decimal" value="${esc(exp.total ?? '')}" required></label>
     </div>
     <label>Magazin / furnizor<input name="store" value="${esc(exp.store)}"></label>
     <label>Categorie<select name="categoryId">${options(state.categories, exp.categoryId, '— alege —')}</select></label>
@@ -399,9 +413,9 @@ function openExpense(exp, { runOcr = false } = {}) {
     </div>
     <fieldset id="fuel-block" class="${cat?.isFuel || exp.fuel?.liters ? '' : 'hidden'}"><legend>⛽ Alimentare</legend>
       <div class="grid3">
-        <label>Litri<input name="liters" inputmode="decimal" value="${exp.fuel?.liters ?? ''}"></label>
-        <label>Preț / L<input name="ppl" inputmode="decimal" value="${exp.fuel?.pricePerLiter ?? ''}"></label>
-        <label>Km la bord<input name="km" inputmode="numeric" value="${exp.fuel?.km ?? ''}"></label>
+        <label>Litri<input name="liters" inputmode="decimal" value="${esc(exp.fuel?.liters ?? '')}"></label>
+        <label>Preț / L<input name="ppl" inputmode="decimal" value="${esc(exp.fuel?.pricePerLiter ?? '')}"></label>
+        <label>Km la bord<input name="km" inputmode="numeric" value="${esc(exp.fuel?.km ?? '')}"></label>
       </div>
       <label>Tip carburant<input name="fuelType" list="fuel-types" value="${esc(exp.fuel?.fuelType || '')}"></label>
       <datalist id="fuel-types"><option>benzină</option><option>motorină</option><option>GPL</option><option>electric (kWh)</option></datalist>
@@ -469,7 +483,9 @@ function openExpense(exp, { runOcr = false } = {}) {
     $('#exp-photo', root)?.addEventListener('click', async () => {
       const f = await pickFile();
       if (!f) return;
-      exp.image = await compressImage(f);
+      const img = await compressImage(f);
+      if (!img) return;
+      exp.image = img;
       Object.assign(exp, readExpenseForm(form, exp));
       openExpense(exp, { runOcr: true });
     });
@@ -478,7 +494,7 @@ function openExpense(exp, { runOcr = false } = {}) {
       ev.preventDefault();
       const data = readExpenseForm(form, exp);
       if (data.total == null) { toast('Completează totalul'); return; }
-      await save('expenses', data);
+      if (!(await save('expenses', data))) return;
       closeModal();
       toast('Bon salvat ✔');
     });
@@ -516,6 +532,7 @@ async function photoReceipt(capture = true) {
   const f = await pickFile({ capture });
   if (!f) return;
   const image = await compressImage(f);
+  if (!image) return;
   openExpense(newExpense({ image }), { runOcr: true });
 }
 
@@ -529,7 +546,7 @@ function openOdometer(o, { runOcr = false } = {}) {
     <label>Mașina<select name="vehicleId" required>${options(state.vehicles, o.vehicleId, '— alege —')}</select></label>
     <div class="grid2">
       <label>Data<input name="date" type="date" value="${esc(o.date)}" required></label>
-      <label>Km<input name="km" inputmode="numeric" value="${o.km ?? ''}" required></label>
+      <label>Km<input name="km" inputmode="numeric" value="${esc(o.km ?? '')}" required></label>
     </div>
     <label>Notițe<input name="notes" value="${esc(o.notes || '')}"></label>
     <div class="actions">${isNew ? '' : '<button type="button" class="danger" id="odo-del">Șterge</button>'}<button class="primary">Salvează</button></div>
@@ -548,7 +565,7 @@ function openOdometer(o, { runOcr = false } = {}) {
       ev.preventDefault();
       const km = toNum(form.km.value);
       if (!km) return toast('Introdu kilometrii');
-      await save('odometer', { ...o, vehicleId: form.vehicleId.value, date: form.date.value, km, notes: form.notes.value.trim() });
+      if (!(await save('odometer', { ...o, vehicleId: form.vehicleId.value, date: form.date.value, km, notes: form.notes.value.trim() }))) return;
       closeModal();
       toast('Kilometraj salvat ✔');
     });
@@ -592,7 +609,7 @@ function openReminder(r) {
       notified: r.dueDate === form.dueDate.value ? (r.notified || []) : [],
     });
     $('#rem-del', root)?.addEventListener('click', async () => { if (await remove('reminders', r.id, 'expirarea')) closeModal(); });
-    $('#rem-ics', root)?.addEventListener('click', () => downloadICS([read()], `${r.type}.ics`));
+    $('#rem-ics', root)?.addEventListener('click', () => downloadICS([read()], 'expirare.ics'));
     $('#rem-renew', root)?.addEventListener('click', () => {
       const [y, m, d] = form.dueDate.value.split('-').map(Number);
       const years = form.type.value === 'ITP' ? 2 : 1;
@@ -601,7 +618,7 @@ function openReminder(r) {
     });
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      await save('reminders', read());
+      if (!(await save('reminders', read()))) return;
       closeModal();
       toast('Salvat ✔');
       checkReminders();
@@ -612,16 +629,17 @@ function openReminder(r) {
 function icsDate(s) { return s.replace(/-/g, ''); }
 function downloadICS(reminders, filename = 'expirari.ics') {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-  const events = reminders.map((r) => {
+  const events = reminders.filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.dueDate)).map((r) => {
     const v = vehById(r.vehicleId);
     const [y, m, d] = r.dueDate.split('-').map(Number);
     const next = new Date(y, m - 1, d + 1);
     const end = `${next.getFullYear()}${String(next.getMonth() + 1).padStart(2, '0')}${String(next.getDate()).padStart(2, '0')}`;
-    const alarms = (r.notifyDays || [30, 7, 1]).map((n) =>
-      `BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:${r.title || r.type}\r\nTRIGGER:-P${n}DT0H\r\nEND:VALARM`).join('\r\n');
-    return `BEGIN:VEVENT\r\nUID:${r.id}@bonuri-app\r\nDTSTAMP:${stamp}\r\nDTSTART;VALUE=DATE:${icsDate(r.dueDate)}\r\nDTEND;VALUE=DATE:${end}\r\n` +
-      `SUMMARY:Expiră ${r.title || r.type}${v ? ' – ' + v.name + (v.plate ? ' ' + v.plate : '') : ''}\r\n` +
-      `DESCRIPTION:${(r.notes || '').replace(/\n/g, '\\n')}\r\n${alarms}\r\nEND:VEVENT`;
+    const what = icsText(r.title || r.type);
+    const alarms = (r.notifyDays?.length ? r.notifyDays : [30, 7, 1]).map((n) =>
+      `BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:${what}\r\nTRIGGER:-P${Math.max(0, Math.round(+n || 0))}DT0H\r\nEND:VALARM`).join('\r\n');
+    return `BEGIN:VEVENT\r\nUID:${icsText(r.id)}@bonuri-app\r\nDTSTAMP:${stamp}\r\nDTSTART;VALUE=DATE:${icsDate(r.dueDate)}\r\nDTEND;VALUE=DATE:${end}\r\n` +
+      `SUMMARY:Expiră ${what}${v ? icsText(' – ' + v.name + (v.plate ? ' ' + v.plate : '')) : ''}\r\n` +
+      `DESCRIPTION:${icsText(r.notes)}\r\n${alarms}\r\nEND:VEVENT`;
   }).join('\r\n');
   const ics = `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Bonuri si Masina//RO\r\nCALSCALE:GREGORIAN\r\n${events}\r\nEND:VCALENDAR\r\n`;
   download(new Blob([ics], { type: 'text/calendar' }), filename);
@@ -681,7 +699,7 @@ function openList(t) {
       ev.preventDefault();
       const lines = form.items.value.split('\n').map((s) => s.trim()).filter(Boolean);
       const items = lines.map((text) => t.items.find((i) => i.text === text) || { id: db.uid(), text, done: false });
-      await save('tasks', { ...t, title: form.title.value.trim(), date: form.date.value, projectId: form.projectId.value, items, createdAt: t.createdAt || Date.now() });
+      if (!(await save('tasks', { ...t, title: form.title.value.trim(), date: form.date.value, projectId: form.projectId.value, items, createdAt: t.createdAt || Date.now() }))) return;
       closeModal();
       toast('Listă salvată ✔');
     });
@@ -708,7 +726,7 @@ function openCategory(c) {
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const isFuel = form.isFuel.checked;
-      await save('categories', { ...c, name: form.name.value.trim(), color: form.color.value, isFuel, isCar: form.isCar.checked || isFuel, order: c.order ?? state.categories.length });
+      if (!(await save('categories', { ...c, name: form.name.value.trim(), color: form.color.value, isFuel, isCar: form.isCar.checked || isFuel, order: c.order ?? state.categories.length }))) return;
       closeModal();
     });
   });
@@ -721,7 +739,7 @@ function openProject(p) {
   <form id="proj-form" class="form">
     ${isNew ? '' : `<p>Total cheltuit: <b>${money(total)}</b></p>`}
     <label>Nume<input name="name" value="${esc(p.name)}" required placeholder="ex.: Construcție casă"></label>
-    <label>Buget (opțional)<input name="budget" inputmode="decimal" value="${p.budget ?? ''}"></label>
+    <label>Buget (opțional)<input name="budget" inputmode="decimal" value="${esc(p.budget ?? '')}"></label>
     <label>Notițe<textarea name="notes" rows="2">${esc(p.notes || '')}</textarea></label>
     <div class="actions">${isNew ? '' : '<button type="button" class="danger" id="proj-del">Șterge</button>'}<button class="primary">Salvează</button></div>
   </form>`, (root) => {
@@ -729,7 +747,7 @@ function openProject(p) {
     $('#proj-del', root)?.addEventListener('click', async () => { if (await remove('projects', p.id, 'proiectul')) closeModal(); });
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      await save('projects', { ...p, name: form.name.value.trim(), budget: toNum(form.budget.value), notes: form.notes.value.trim() });
+      if (!(await save('projects', { ...p, name: form.name.value.trim(), budget: toNum(form.budget.value), notes: form.notes.value.trim() }))) return;
       closeModal();
     });
   });
@@ -751,7 +769,7 @@ function openVehicle(v) {
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       state.vehicleId = v.id;
-      await save('vehicles', { ...v, name: form.name.value.trim(), plate: form.plate.value.trim().toUpperCase(), fuelType: form.fuelType.value.trim(), vin: form.vin.value.trim() });
+      if (!(await save('vehicles', { ...v, name: form.name.value.trim(), plate: form.plate.value.trim().toUpperCase(), fuelType: form.fuelType.value.trim(), vin: form.vin.value.trim() }))) return;
       closeModal();
     });
   });
@@ -768,28 +786,71 @@ function download(blob, filename) {
 }
 
 function exportCSV() {
-  const q = (s) => `"${String(s ?? '').replace(/"/g, '""')}"`;
-  const n = (x) => (x == null || x === '' ? '' : String(x).replace('.', ','));
+  const n = (x) => (x == null || x === '' ? '' : String(+x).replace('.', ','));
   const head = ['Data', 'Magazin', 'CIF', 'Categorie', 'Proiect', 'Masina', 'Total', 'Litri', 'Pret/L', 'Km', 'Carburant', 'Note'];
   const rows = state.expenses.slice().sort((a, b) => a.date.localeCompare(b.date)).map((e) => {
     const v = vehById(e.vehicleId);
     const cif = (e.ocrText || '').match(/C\.?\s*I\.?\s*F\.?\s*[:.]?\s*((?:RO\s*)?\d{4,10})/i)?.[1] || '';
-    return [e.date, q(e.store), q(cif.replace(/\s/g, '')), q(catById(e.categoryId)?.name), q(projById(e.projectId)?.name), q(v ? `${v.name} ${v.plate || ''}`.trim() : ''),
-      n(e.total), n(e.fuel?.liters), n(e.fuel?.pricePerLiter), n(e.fuel?.km), q(e.fuel?.fuelType), q(e.notes)].join(';');
+    return [csvCell(e.date), csvCell(e.store), csvCell(cif.replace(/\s/g, '')), csvCell(catById(e.categoryId)?.name), csvCell(projById(e.projectId)?.name),
+      csvCell(v ? `${v.name} ${v.plate || ''}`.trim() : ''), n(e.total), n(e.fuel?.liters), n(e.fuel?.pricePerLiter), n(e.fuel?.km),
+      csvCell(e.fuel?.fuelType), csvCell(e.notes)].join(';');
   });
-  download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `cheltuieli-${todayISO()}.csv`);
+  download(new Blob(['﻿' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `cheltuieli-${todayISO()}.csv`);
 }
 
 const blobToDataURL = (b) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(b); });
+function dataURLToBlob(url) {
+  const [head, b64] = url.split(',');
+  const type = head.slice(5, head.indexOf(';'));
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type });
+}
+
+// Cere o parolă într-o fereastră proprie (nu în prompt(), care o afișează în clar).
+function askPassword(title, { confirmIt = false, optional = false } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    openModal(title, `
+    <form id="pw-form" class="form">
+      ${optional ? '<p class="small">Recomandat: backup-ul conține toate bonurile tale. Cu parolă, nimeni nu îl poate citi fără ea (de ex. dacă îl trimiți pe e-mail sau în cloud). <b>Dacă uiți parola, backup-ul nu mai poate fi deschis.</b></p>' : ''}
+      <label>Parolă<input name="pw" type="password" autocomplete="new-password" minlength="${optional ? 0 : 1}"></label>
+      ${confirmIt ? '<label>Repetă parola<input name="pw2" type="password" autocomplete="new-password"></label>' : ''}
+      <div class="actions">${optional ? '<button type="button" id="pw-skip">Fără parolă</button>' : ''}<button class="primary">Continuă</button></div>
+    </form>`, (root) => {
+      const form = $('#pw-form', root);
+      $('#modal').addEventListener('close', () => finish(null), { once: true });
+      $('#pw-skip', root)?.addEventListener('click', () => { finish(''); closeModal(); });
+      form.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        const pw = form.pw.value;
+        if (confirmIt && pw && pw.length < 8) return toast('Parola trebuie să aibă minim 8 caractere');
+        if (confirmIt && pw !== form.pw2.value) return toast('Parolele nu coincid');
+        if (!pw && !optional) return toast('Introdu parola');
+        finish(pw);
+        closeModal();
+      });
+      form.pw.focus();
+    });
+  });
+}
 
 async function exportJSON() {
+  const pw = await askPassword('Backup complet', { confirmIt: true, optional: true });
+  if (pw === null) return;
   toast('Pregătesc backup-ul…');
   const out = { app: 'bonuri-masina', version: 1, exportedAt: new Date().toISOString() };
-  for (const s of ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects']) {
+  for (const s of DATA_STORES) {
     out[s] = await Promise.all(state[s].map(async (o) => (o.image instanceof Blob ? { ...o, image: await blobToDataURL(o.image) } : o)));
   }
-  download(new Blob([JSON.stringify(out)], { type: 'application/json' }), `backup-bonuri-${todayISO()}.json`);
+  let json = JSON.stringify(out);
+  if (pw) json = JSON.stringify(await encryptText(json, pw));
+  download(new Blob([json], { type: 'application/json' }), `backup-bonuri-${todayISO()}${pw ? '-criptat' : ''}.json`);
 }
+
+const MAX_BACKUP_BYTES = 300e6;
 
 async function importJSON() {
   const input = document.createElement('input');
@@ -799,19 +860,34 @@ async function importJSON() {
     const file = input.files[0];
     if (!file) return;
     try {
-      const data = JSON.parse(await file.text());
-      if (data.app !== 'bonuri-masina') throw new Error('Fișierul nu este un backup al aplicației.');
+      if (file.size > MAX_BACKUP_BYTES) throw new Error('Fișier prea mare.');
+      let data = JSON.parse(await file.text());
+      if (data?.app !== 'bonuri-masina') throw new Error('Fișierul nu este un backup al aplicației.');
+      if (data.encrypted) {
+        const pw = await askPassword('Parola backup-ului');
+        if (!pw) return;
+        data = JSON.parse(await decryptText(data, pw));
+        if (data?.app !== 'bonuri-masina') throw new Error('Backup invalid.');
+      }
       if (!confirm('Restaurarea adaugă/actualizează datele din backup. Continui?')) return;
-      for (const s of ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects']) {
-        for (const o of data[s] || []) {
-          if (typeof o.image === 'string' && o.image.startsWith('data:')) o.image = await (await fetch(o.image)).blob();
-          await db.put(s, o);
+      let ok = 0;
+      let skipped = 0;
+      for (const s of DATA_STORES) {
+        const list = Array.isArray(data[s]) ? data[s] : [];
+        for (const o of list) {
+          if (!o || typeof o !== 'object') { skipped++; continue; }
+          const img = o.image;
+          const clean = sanitize(s, { ...o, image: null });
+          if (!clean) { skipped++; continue; }
+          if (safeImageDataURL(img)) clean.image = dataURLToBlob(img);
+          await db.put(s, clean);
+          ok++;
         }
       }
       await loadAll();
       render();
-      toast('Backup restaurat ✔');
-    } catch (e) { alert('Eroare: ' + e.message); }
+      toast(`Backup restaurat ✔ (${ok} înregistrări${skipped ? `, ${skipped} ignorate` : ''})`);
+    } catch (e) { alert('Eroare: ' + (e.message || 'fișier invalid')); }
   };
   input.click();
 }
@@ -841,7 +917,8 @@ const actions = {
     if (!(await needVehicle())) return;
     const f = await pickFile();
     if (!f) return;
-    openOdometer({ id: db.uid(), vehicleId: state.vehicleId, date: todayISO(), km: null, image: await compressImage(f, 1200) }, { runOcr: true });
+    const image = await compressImage(f, 1200);
+    if (image) openOdometer({ id: db.uid(), vehicleId: state.vehicleId, date: todayISO(), km: null, image }, { runOcr: true });
   },
   'new-odometer': async () => { if (await needVehicle()) openOdometer({ id: db.uid(), vehicleId: state.vehicleId, date: todayISO(), km: null }); },
   'edit-odometer': (el) => openOdometer({ ...state.odometer.find((o) => o.id === el.dataset.id) }),
@@ -931,6 +1008,11 @@ $('#modal-close').addEventListener('click', closeModal);
 
 // ---------- pornire ----------
 async function start() {
+  // Protecție clickjacking: aplicația nu rulează încadrată în pagina altcuiva.
+  if (window.top !== window.self) {
+    document.body.innerHTML = '<p style="padding:20px">Deschide aplicația direct, nu într-un cadru.</p>';
+    return;
+  }
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }

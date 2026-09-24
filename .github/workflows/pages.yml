@@ -26,6 +26,8 @@ jobs:
         with:
           node-version: 22
       - run: npm test
+      - name: Verifică integritatea motorului OCR
+        run: cd vendor/tesseract && sha256sum -c SHA256SUMS
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
