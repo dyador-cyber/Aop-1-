@@ -1,7 +1,10 @@
 import * as db from './db.js';
-import { parseReceipt, parseOdometer, runQuery, isFuelExpense, normalize } from './parsers.js';
+import { parseReceipt, parseOdometer, runQuery, isFuelExpense, normalize, shortCompanyName, findBrand } from './parsers.js';
+import { lookupCui } from './anaf.js';
+import { expenseFlags, isUnknownItem } from './checks.js';
+import { shareReceiptPhotos, printReceipts } from './copy.js';
 import { recognize, compressImage as compressRaw } from './ocr.js';
-import { sanitize, sanitizeRules, sanitizeInvSubs, sanitizeStoreRules, safeImageDataURL, csvCell, icsText } from './sanitize.js';
+import { sanitize, sanitizeRules, sanitizeInvSubs, sanitizeStoreRules, sanitizeCuiCache, sanitizeItemNames, safeImageDataURL, csvCell, icsText } from './sanitize.js';
 import { SUBCATS, GROUPS, groupOf, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
 import { INV_STATUSES, OWNED, statusByKey, syncFromExpense, undoExpense, findSimilar, addMonths, WARRANTY_MONTHS } from './inventory.js';
 import { encryptText, decryptText } from './crypto.js';
@@ -20,14 +23,15 @@ const DEFAULT_CATEGORIES = [
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
 // Afișată în Setări: arată dacă telefonul a luat ultima actualizare.
-const APP_VERSION = '2026.09.24-7';
+const APP_VERSION = '2026.09.25-1';
 const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
 
 const state = {
   view: 'home',
   expenses: [], odometer: [], vehicles: [], reminders: [], tasks: [], categories: [], projects: [],
-  filter: { q: '', cat: '', proj: '', month: '' },
+  filter: { q: '', cat: '', proj: '', month: '', check: false },
+  listLimit: 100,
   vehicleId: '',
   ask: '', askResult: null,
   itemRules: {},
@@ -36,6 +40,9 @@ const state = {
   inventory: [],
   invSubs: ['tools'],
   storeRules: {},
+  cuiCache: {},
+  itemNames: {},
+  anafStatus: null,
   invFilter: { q: '', status: 'owned', loc: '' },
 };
 
@@ -91,12 +98,19 @@ async function loadAll() {
   for (const s of DATA_STORES) {
     state[s] = (await db.getAll(s)).map((o) => sanitize(s, o)).filter(Boolean);
   }
-  state.categories.sort((a, b) => (a.order ?? 99) - (b.order ?? 99) || a.name.localeCompare(b.name));
-  state.projects.sort((a, b) => a.name.localeCompare(b.name));
+  sortState();
   if (!state.vehicleId || !vehById(state.vehicleId)) state.vehicleId = state.vehicles[0]?.id || '';
   state.itemRules = sanitizeRules((await db.get('meta', 'itemRules'))?.rules);
   state.invSubs = sanitizeInvSubs((await db.get('meta', 'inventorySettings'))?.subs);
   state.storeRules = sanitizeStoreRules((await db.get('meta', 'storeRules'))?.rules);
+  state.cuiCache = sanitizeCuiCache((await db.get('meta', 'cuiCache'))?.data);
+  state.itemNames = sanitizeItemNames((await db.get('meta', 'itemNames'))?.data);
+  const st = await db.get('meta', 'anafStatus');
+  state.anafStatus = st && typeof st.at === 'number' ? { ok: st.ok === true, at: st.at } : null;
+}
+function sortState() {
+  state.categories.sort((a, b) => (a.order ?? 99) - (b.order ?? 99) || a.name.localeCompare(b.name));
+  state.projects.sort((a, b) => a.name.localeCompare(b.name));
   state.inventory.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -112,7 +126,13 @@ async function save(store, obj) {
   const clean = sanitize(store, obj);
   if (!clean) { toast('Date invalide – verifică câmpurile'); return false; }
   await db.put(store, clean);
-  await loadAll();
+  // bonurile și inventarul se actualizează pe loc (rapid și cu mii de bonuri); restul se recitesc
+  if (store === 'expenses' || store === 'inventory') {
+    const list = state[store];
+    const i = list.findIndex((o) => o.id === clean.id);
+    if (i >= 0) list[i] = clean; else list.push(clean);
+    sortState();
+  } else await loadAll();
   render();
   return true;
 }
@@ -150,13 +170,15 @@ function render() {
 function expenseRow(e) {
   const cat = catById(e.categoryId);
   const proj = projById(e.projectId);
-  const img = imgURL(e);
+  const img = blobURL(e.thumb || e.image);
   const fuel = e.fuel?.liters ? ` · ${num(e.fuel.liters)} L` : '';
+  const flags = expenseFlags(e);
   return `<li class="row" data-action="edit-expense" data-id="${esc(e.id)}">
-    ${img ? `<img class="thumb" src="${img}" alt="">` : '<div class="thumb ph">🧾</div>'}
+    ${img ? `<img class="thumb" src="${img}" alt="" loading="lazy" decoding="async">` : '<div class="thumb ph">🧾</div>'}
     <div class="grow">
       <div class="title">${e.isReturn ? '↩️ ' : ''}${esc(e.store || 'Fără nume')}${e.extraImages?.length ? ` <span class="muted small">📄×${e.extraImages.length + 1}</span>` : ''}</div>
       <div class="sub">${fmtDate(e.date)} · <span class="dot" style="background:${esc(cat?.color || '#999')}"></span>${esc(cat?.name || 'Fără categorie')}${proj ? ' · 📁 ' + esc(proj.name) : ''}${fuel}</div>
+      ${flags.length ? `<div class="sub warn-text">${flags[0].text.startsWith('❓') ? '' : '⚠️ '}${esc(flags[0].text.replace(/ – .*/, ''))}${flags.length > 1 ? ` (+${flags.length - 1})` : ''}</div>` : ''}
     </div>
     <div class="amount">${money(e.total)}</div>
   </li>`;
@@ -218,6 +240,7 @@ function renderHome() {
   const upcoming = state.reminders.filter((r) => !r.done && RC.daysUntil(r.dueDate, new Date()) <= 45)
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   const todayLists = state.tasks.filter((t) => t.date && t.date <= now && t.items.some((i) => !i.done));
+  const toCheck = state.expenses.filter((e) => expenseFlags(e).length).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const projectTotals = state.projects.map((p) => ({ p, total: state.expenses.filter((e) => e.projectId === p.id).reduce((s, e) => s + (+e.total || 0), 0) }));
 
   return `
@@ -237,6 +260,9 @@ function renderHome() {
     <button class="big-btn" data-action="photo-odometer">🚗<span>Poză kilometraj</span></button>
     <button class="big-btn" data-action="new-list">📝<span>Listă nouă</span></button>
   </section>
+  ${toCheck.length ? `<section class="card check-card"><h3>⚠️ De verificat (${toCheck.length})</h3>
+    <ul class="list">${toCheck.slice(0, 4).map(expenseRow).join('')}</ul>
+    ${toCheck.length > 4 ? '<button class="link" data-action="show-to-check">Vezi toate →</button>' : ''}</section>` : ''}
   ${upcoming.length ? `<section class="card"><h3>⏰ Expirări apropiate</h3><ul class="list">${upcoming.map(reminderRow).join('')}</ul></section>` : ''}
   ${todayLists.length ? `<section class="card"><h3>🛒 De făcut azi</h3>${todayLists.map(listCard).join('')}</section>` : ''}
   <section class="card">
@@ -255,6 +281,7 @@ function filteredExpenses() {
     (!f.cat || e.categoryId === f.cat) &&
     (!f.proj || e.projectId === f.proj) &&
     (!f.month || (e.date || '').startsWith(f.month)) &&
+    (!f.check || expenseFlags(e).length > 0) &&
     (!q || `${e.store} ${e.notes} ${e.ocrText}`.toLowerCase().includes(q)))
     .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0));
 }
@@ -354,8 +381,13 @@ function renderReceipts() {
       <input id="f-month" type="month" value="${esc(f.month)}">
     </div>
     <div class="total-line">${bonuri(list.length)} · <b>${money(total)}</b></div>
+    <div class="row-btns">
+      <label class="check small"><input type="checkbox" id="f-check" ${f.check ? 'checked' : ''}> ⚠️ Doar cele de verificat</label>
+      ${list.length ? `<button class="link" data-action="print-receipts">📤 Copie bonuri (${list.length})</button>` : ''}
+    </div>
   </section>
-  <ul class="list card">${list.map(expenseRow).join('') || '<li class="muted pad">Niciun bon.</li>'}</ul>`;
+  <ul class="list card">${list.slice(0, state.listLimit).map(expenseRow).join('') || '<li class="muted pad">Niciun bon.</li>'}</ul>
+  ${list.length > state.listLimit ? `<button class="link center-btn" data-action="more-receipts">Arată încă ${Math.min(100, list.length - state.listLimit)} (din ${list.length - state.listLimit} rămase)</button>` : ''}`;
 }
 
 function vehicleStats(vid) {
@@ -476,6 +508,10 @@ function renderSettings() {
     <div class="checks-grid">${SUBCATS.filter((c) => c.key !== 'other').map((c) => `<label class="check"><input type="checkbox" data-action="inv-sub" data-sub="${c.key}" ${state.invSubs.includes(c.key) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('')}</div>
     <button data-action="export-inv-csv">⬇️ CSV inventar</button>
   </section>
+  <section class="card"><h3>🏢 Verificare firme (ANAF)</h3>
+    <p class="small">La fiecare bon cu CUI valid, aplicația ia automat de la ANAF denumirea oficială și adresa firmei (se trimite doar CUI-ul). Fiecare CUI e verificat o singură dată.</p>
+    <p class="small">Stare: ${state.anafStatus ? (state.anafStatus.ok ? `<span class="ok-text">✓ funcționează</span> (ultima verificare ${esc(new Date(state.anafStatus.at).toLocaleString('ro-RO'))})` : `<span class="warn-text">⚠️ ANAF nu a răspuns</span> la ultima încercare (${esc(new Date(state.anafStatus.at).toLocaleString('ro-RO'))}); se folosesc datele de pe bon`) : 'încă nicio verificare'} · ${Object.keys(state.cuiCache).length} firme memorate</p>
+  </section>
   <section class="card"><h3>Notificări</h3>
     <p class="small">Stare: <b>${esc(perm)}</b>. Aplicația verifică expirările la fiecare deschidere
     (și în fundal, pe Android, dacă este instalată pe ecranul principal). Pentru siguranță maximă, adaugă expirările și în calendarul telefonului (.ics).</p>
@@ -490,7 +526,7 @@ function renderSettings() {
       <button data-action="import-json">⬆️ Restaurare backup</button>
     </div></section>
   <section class="card"><h3>Zonă periculoasă</h3><button class="danger" data-action="wipe">Șterge toate datele</button></section>
-  <p class="muted small center">Bonuri & Mașină · versiunea ${APP_VERSION} · datele sunt salvate doar pe acest dispozitiv.</p>`;
+  <p class="muted small center">Fiscan · versiunea ${APP_VERSION} · datele sunt salvate doar pe acest dispozitiv.</p>`;
 }
 
 // ---------- formular bon ----------
@@ -501,6 +537,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
   <form id="exp-form" class="form">
     <div id="exp-photos"></div>
     <div id="ocr-status" class="ocr ${runOcr ? '' : 'hidden'}">🔍 Citesc bonul… <progress max="1" value="0"></progress></div>
+    <div id="checks" class="checks hidden"></div>
     <div class="grid2">
       <label>Data<input name="date" type="date" value="${esc(exp.date)}" required></label>
       <label>Total (lei)<input name="total" inputmode="decimal" value="${esc(exp.total ?? '')}" required></label>
@@ -510,6 +547,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       <label>Bonul original (opțional)<select name="returnOf"></select></label>
     </div>
     <label>Magazin / furnizor<input name="store" value="${esc(exp.store)}"></label>
+    <div id="supplier-line" class="supplier small"></div>
     <label>Categorie<select name="categoryId">${options(state.categories, exp.categoryId, '— alege —')}</select></label>
     <label>Proiect<select name="projectId">${options(state.projects, exp.projectId)}</select></label>
     <div id="car-block" class="${cat?.isCar || exp.vehicleId ? '' : 'hidden'}">
@@ -530,6 +568,14 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     </details>
     <label>Notițe<textarea name="notes" rows="2">${esc(exp.notes)}</textarea></label>
     <details><summary>Text citit de pe bon</summary><textarea name="ocrText" rows="6">${esc(exp.ocrText)}</textarea></details>
+    ${exp.image ? `<label class="check small"><input type="checkbox" name="hq" ${exp.hq ? 'checked' : ''}> 📸 Păstrează poza la calitate mare (pentru garanție) – automat la scule</label>
+    <details class="copy-box"><summary>📤 Copie bon</summary>
+      <div class="row-btns">
+        <button type="button" data-copy="share">🖼️ Trimite pozele</button>
+        <button type="button" data-copy="print">🖨️ PDF / tipărire</button>
+      </div>
+      <p class="muted small">„PDF / tipărire” deschide fereastra de tipărire; alege „Salvează ca PDF” ca să ai fișierul.</p>
+    </details>` : ''}
     <div class="actions">
       ${isNew ? '' : '<button type="button" class="danger" id="exp-del">Șterge</button>'}
       ${exp.image ? '<button type="button" id="exp-ocr">🔍 Recitește</button><button type="button" id="exp-more">➕ Continuare bon</button>' : '<button type="button" id="exp-photo">📷 Adaugă poză</button>'}
@@ -556,6 +602,46 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     form.liters.addEventListener('change', recalc);
     form.total.addEventListener('change', recalc);
 
+    // ---- firma: denumire oficială, CUI, adresă (verificate automat la ANAF)
+    const renderSupplier = () => {
+      const box = $('#supplier-line', root);
+      if (!box) return;
+      const parts = [];
+      if (exp.supplierName) parts.push(`🏢 ${esc(exp.supplierName)}`);
+      if (exp.cif) parts.push(`CUI ${esc(exp.cif)}${exp.cifValid ? '' : ' <span class="warn-text">⚠️ posibil citit greșit</span>'}`);
+      if (exp.supplierAddress) parts.push(esc(exp.supplierAddress));
+      if (exp.supplierSource === 'anaf') parts.push('<span class="ok-text">✓ ANAF</span>');
+      box.innerHTML = parts.join(' · ');
+    };
+    const applySupplier = (info) => {
+      if (!form.isConnected || !info?.name) return;
+      exp.supplierName = info.name;
+      exp.supplierAddress = info.address || '';
+      exp.supplierSource = 'anaf';
+      exp.cifValid = true;
+      if (!touched.has('store')) form.store.value = findBrand(info.name) || shortCompanyName(info.name) || form.store.value;
+      renderSupplier();
+    };
+    const verifySupplier = async (cif) => {
+      const key = String(cif).toUpperCase().replace(/\s/g, '');
+      const cached = state.cuiCache[key];
+      if (cached?.ok && cached.name) return applySupplier(cached);
+      // un răspuns negativ recent nu se mai încearcă 7 zile
+      if (cached && Date.now() - cached.checkedAt < 7 * 864e5) return;
+      // după o eroare de rețea nu mai încercăm 10 minute (bonuri adăugate unul după altul)
+      if (state.anafStatus && !state.anafStatus.ok && Date.now() - state.anafStatus.at < 10 * 60e3) return;
+      try {
+        const info = await lookupCui(key);
+        state.cuiCache = sanitizeCuiCache({ ...state.cuiCache, [key]: { ...info, checkedAt: Date.now() } });
+        await db.put('meta', { id: 'cuiCache', data: state.cuiCache });
+        await setAnafStatus(true);
+        if (info.name) applySupplier(info);
+      } catch {
+        await setAnafStatus(false); // ANAF indisponibil: rămân datele de pe bon, fără să deranjăm
+      }
+    };
+    renderSupplier();
+
     // ---- produse
     exp.items = (exp.items || []).map((i) => ({ ...i }));
     let itemsTouched = exp.items.length > 0;
@@ -564,17 +650,42 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       const sum = exp.items.reduce((a, i) => a + (+i.amount || 0), 0);
       const t = toNum(form.total.value);
       $('#items-count', root).textContent = exp.items.length;
+      const sgr = exp.items.filter((i) => i.sub === 'sgr').reduce((a, i) => a + (+i.amount || 0), 0);
       $('#items-sum', root).textContent = exp.items.length
-        ? `· suma ${num(sum)}${t != null ? (Math.abs(Math.abs(sum) - Math.abs(t)) < 0.05 ? ' ✓ = total' : ` ≠ total ${num(t)}`) : ''}` : '';
+        ? `· suma ${num(sum)}${t != null ? (Math.abs(Math.abs(sum) - Math.abs(t)) < 0.05 ? ' ✓ = total' : ` ≠ total ${num(t)}`) : ''}${sgr ? ` · ♻️ SGR ${num(sgr)}` : ''}` : '';
+      renderChecks();
     };
+    // ---- „De verificat”: ce ar putea fi citit greșit, arătat direct în formular
+    const renderChecks = () => {
+      const box = $('#checks', root);
+      if (!box) return;
+      const flags = expenseFlags({ ...readExpenseForm(form, exp), reviewed: false, createdAt: exp.createdAt });
+      box.classList.toggle('hidden', !flags.length);
+      box.innerHTML = flags.length ? `<strong>⚠️ De verificat</strong><ul>${flags.map((f) => `<li>${esc(f.text)}</li>`).join('')}</ul>
+        <label class="check"><input type="checkbox" id="exp-reviewed" ${exp.reviewed ? 'checked' : ''}> Am verificat, e în regulă</label>` : '';
+    };
+    $('#checks', root).addEventListener('change', (ev) => { if (ev.target.id === 'exp-reviewed') exp.reviewed = ev.target.checked; });
     const renderItems = () => {
       $('#items-list', root).innerHTML = exp.items.map((i) => `<div class="item-row" data-id="${esc(i.id)}">
         <input class="it-name" value="${esc(i.name)}" aria-label="Produs">
         <input class="it-amount" inputmode="decimal" value="${esc(i.amount ?? '')}" aria-label="Sumă">
         <select class="it-sub" aria-label="Subcategorie">${subOptions(i.sub)}</select>
-        <button type="button" class="it-del" aria-label="Șterge produsul">✕</button></div>`).join('')
+        <button type="button" class="it-del" aria-label="Șterge produsul">✕</button>
+        ${itemMeta(i)}</div>`).join('')
         || '<p class="muted small">Niciun produs citit. Le poți adăuga manual.</p>';
       updateItemsSum();
+    };
+    // „2 × 2,50 lei · ❓ neidentificat”: detaliile de sub fiecare produs
+    const itemMeta = (i) => {
+      const bits = [];
+      if (i.qty != null && i.unitPrice != null && !(Math.abs(i.qty) === 1 && Math.abs(i.amount) === i.unitPrice)) bits.push(`${num(Math.abs(i.qty))} × ${num(i.unitPrice)} lei`);
+      if (i.sub === 'sgr') bits.push('♻️ recuperabil la returnarea ambalajului');
+      else if (isUnknownItem(i)) bits.push('<span class="warn-text">❓ neidentificat – corectează numele</span>');
+      return bits.length ? `<span class="it-meta small muted">${bits.join(' · ')}</span>` : '';
+    };
+    const refreshMeta = (row, it) => {
+      row.querySelector('.it-meta')?.remove();
+      row.insertAdjacentHTML('beforeend', itemMeta(it));
     };
     const itemOf = (el) => exp.items.find((i) => i.id === el.closest('.item-row')?.dataset.id);
     $('#items-list', root).addEventListener('input', (ev) => {
@@ -594,6 +705,8 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
         it.sub = classifyItem(it.name, state.itemRules);
         ev.target.closest('.item-row').querySelector('.it-sub').value = it.sub;
       }
+      refreshMeta(ev.target.closest('.item-row'), it);
+      renderChecks();
     });
     $('#items-list', root).addEventListener('click', (ev) => {
       if (!ev.target.classList.contains('it-del')) return;
@@ -609,7 +722,8 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       renderItems();
       $('#items-list .item-row:last-child .it-name', root)?.focus();
     });
-    form.total.addEventListener('input', updateItemsSum);
+    form.total.addEventListener('input', () => { exp.totalSource = ''; updateItemsSum(); });
+    form.addEventListener('change', renderChecks);
 
     // ---- retur
     const fillReturnOf = () => {
@@ -645,6 +759,9 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     // Bonurile lungi: fiecare poză e citită separat, textele se lipesc în ordine
     // (magazin/dată/CUI din prima parte, totalul de obicei din ultima).
     exp.extraImages = exp.extraImages || [];
+    // pozele originale (necomprimate) din această sesiune: folosite doar dacă bonul se păstrează la calitate mare
+    const originals = [];
+    if (ocrSource) originals[photosOf(exp).length - 1] = ocrSource;
     const partTexts = exp.ocrText ? exp.ocrText.split(PART_SEP) : [];
     const st = $('#ocr-status', root);
     let pending = 0;
@@ -673,10 +790,22 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       const set = (name, val) => { if (val != null && val !== '' && !touched.has(name)) form[name].value = val; };
       set('date', r.date);
       set('store', r.store);
+      exp.cif = r.cif || exp.cif || '';
+      exp.cifValid = !!r.cifValid;
+      exp.cifRepaired = !!r.cifRepaired;
+      exp.paid = r.paid ?? null;
+      if (!touched.has('total')) exp.totalSource = r.totalSource || '';
+      if (exp.supplierSource !== 'anaf') { exp.supplierName = r.storeOfficial || ''; exp.supplierSource = r.storeOfficial ? 'bon' : ''; }
+      renderSupplier();
+      if (r.cifValid) verifySupplier(r.cif);
       set('total', r.total != null ? r.total.toFixed(2) : '');
       if (!touched.has('isReturn') && r.isReturn !== form.isReturn.checked) { form.isReturn.checked = r.isReturn; }
       if (!itemsTouched) {
-        exp.items = parseItems(text, { isReturn: r.isReturn }).map((i) => ({ id: db.uid(), ...i, sub: classifyItem(i.name, state.itemRules) }));
+        exp.items = parseItems(text, { isReturn: r.isReturn }).map((i) => {
+          // numele corectat data trecută (după codul de bare sau după primele cuvinte citite)
+          const name = (i.ean && state.itemNames['ean ' + i.ean]) || state.itemNames[itemKey(i.name)] || i.name;
+          return { id: db.uid(), ...i, ocrName: i.name, name, sub: classifyItem(name, state.itemRules, i.ean) };
+        });
         if (exp.items.length) $('#items-box', root).open = true;
       }
       syncReturn(true);
@@ -740,6 +869,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       const img = await compressImage(f);
       if (!img) return;
       exp.extraImages.push(img);
+      originals[photosOf(exp).length - 1] = f;
       renderPhotos();
       ocrPart(photosOf(exp).length - 1, f);
     });
@@ -751,6 +881,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       if (!confirm(`Ștergi partea ${i + 1}?`)) return;
       exp.extraImages.splice(i - 1, 1);
       partTexts.splice(i, 1);
+      originals.splice(i, 1);
       renderPhotos();
       applyParse();
     });
@@ -763,6 +894,15 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       Object.assign(exp, readExpenseForm(form, exp));
       openExpense(exp, { runOcr: true, ocrSource: f });
     });
+    $('.copy-box', root)?.addEventListener('click', async (ev) => {
+      const kind = ev.target.closest('[data-copy]')?.dataset.copy;
+      if (!kind) return;
+      const cur = { ...readExpenseForm(form, exp), supplierName: exp.supplierName, supplierAddress: exp.supplierAddress };
+      if (kind === 'share') {
+        const r = await shareReceiptPhotos(cur, download);
+        if (r === 'downloaded') toast('Pozele au fost descărcate');
+      } else printReceipts([cur], { title: `Bon ${cur.store || ''}`.trim(), urlOf: blobURL });
+    });
     $('#exp-del', root)?.addEventListener('click', async () => {
       const old = state.expenses.find((e) => e.id === exp.id);
       if (!(await remove('expenses', exp.id, 'bonul'))) return;
@@ -774,7 +914,9 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       const data = readExpenseForm(form, exp);
       if (data.total == null) { toast('Completează totalul'); return; }
       await learnSubcats(exp.items.filter((i) => i.manualSub));
+      await learnNames(data.items);
       if (touched.has('store')) await learnStore(data);
+      await finishPhotos(data, originals, !!form.hq?.checked);
       if (!(await save('expenses', data))) return;
       closeModal();
       const saved = state.expenses.find((e) => e.id === data.id);
@@ -818,7 +960,8 @@ async function applyInventory(out) {
   if (!out.puts.length && !out.dels.length) return;
   for (const id of out.dels) await db.del('inventory', id);
   for (const x of out.puts) { const c = sanitize('inventory', x); if (c) await db.put('inventory', c); }
-  await loadAll();
+  state.inventory = (await db.getAll('inventory')).map((o) => sanitize('inventory', o)).filter(Boolean);
+  sortState();
   render();
 }
 
@@ -1024,7 +1167,7 @@ function exportInventoryCSV() {
   const head = ['Denumire', 'Bucati', 'Loc', 'Stare', 'Imprumutata lui', 'Din data', 'Data cumparare', 'Pret/buc', 'Magazin', 'Garantie pana la', 'Subcategorie', 'Note'];
   const rows = state.inventory.map((x) => [csvCell(x.name), n(x.qty), csvCell(x.location), csvCell(statusByKey(x.status).name), csvCell(x.lentTo), csvCell(x.lentDate),
     csvCell(x.purchaseDate), n(x.price), csvCell(x.store), csvCell(x.warrantyUntil), csvCell(subcatByKey(x.sub).name), csvCell(x.notes)].join(';'));
-  download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `inventar-${todayISO()}.csv`);
+  download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `fiscan-inventar-${todayISO()}.csv`);
 }
 
 // Ai corectat numele magazinului pe un bon cu CUI: data viitoare același CUI primește același nume.
@@ -1035,18 +1178,71 @@ async function learnStore(e) {
   await db.put('meta', { id: 'storeRules', rules: state.storeRules });
 }
 
+async function setAnafStatus(ok) {
+  state.anafStatus = { ok, at: Date.now() };
+  await db.put('meta', { id: 'anafStatus', ...state.anafStatus });
+}
+
+// Ține minte numele corectate: data viitoare produsul cu același cod de bare
+// (sau aceleași cuvinte citite) apare direct cu numele bun.
+async function learnNames(items) {
+  const names = { ...state.itemNames };
+  let changed = false;
+  for (const i of items) {
+    if (!i.ocrName || i.name === i.ocrName) continue;
+    const key = i.ean ? 'ean ' + i.ean : itemKey(i.ocrName);
+    if (key && names[key] !== i.name) { names[key] = i.name; changed = true; }
+  }
+  if (!changed) return;
+  state.itemNames = sanitizeItemNames(names);
+  await db.put('meta', { id: 'itemNames', data: state.itemNames });
+}
+
 // Ține minte subcategoriile alese manual: data viitoare același produs e încadrat la fel.
 async function learnSubcats(items) {
   if (!items.length) return;
   const rules = { ...state.itemRules };
   for (const i of items) {
     const key = itemKey(i.name);
+    if (i.ean) rules['ean ' + i.ean] = i.sub;
     if (!key) continue;
     if (i.sub === classifyItem(i.name)) delete rules[key];
     else rules[key] = i.sub;
   }
   state.itemRules = sanitizeRules(rules);
   await db.put('meta', { id: 'itemRules', rules: state.itemRules });
+}
+
+// Pozele bonului: calitate mare doar când contează (scule / garanție / bifat), altfel rămân ușoare.
+// Plus o miniatură mică pentru liste, ca aplicația să rămână rapidă și cu mii de bonuri.
+async function finishPhotos(data, originals, wanted) {
+  const hq = wanted || data.items.some((i) => i.sub === 'tools' || state.invSubs.includes(i.sub));
+  data.hq = hq;
+  if (hq) {
+    for (const [i, f] of originals.entries()) {
+      if (!f) continue;
+      const big = await compressRaw(f, 2400, 0.88).catch(() => null);
+      if (!big) continue;
+      if (i === 0) data.image = big; else if (data.extraImages?.[i - 1]) data.extraImages[i - 1] = big;
+    }
+  }
+  if (data.image && (!data.thumb || originals.some(Boolean))) data.thumb = await makeThumb(data.image);
+}
+const makeThumb = (blob) => compressRaw(blob, 240, 0.6).catch(() => null);
+
+// Bonurile mai vechi primesc miniatura pe rând, în fundal, fără să blocheze aplicația.
+async function backfillThumbs() {
+  const todo = state.expenses.filter((e) => e.image && !e.thumb).map((e) => e.id);
+  for (const id of todo) {
+    await new Promise((r) => setTimeout(r, 30));
+    const raw = await db.get('expenses', id);
+    if (!raw?.image || raw.thumb) continue;
+    const thumb = await makeThumb(raw.image);
+    if (!thumb) continue;
+    await db.put('expenses', { ...raw, thumb });
+    const e = state.expenses.find((x) => x.id === id);
+    if (e) e.thumb = thumb;
+  }
 }
 
 function newExpense(extra = {}) {
@@ -1322,7 +1518,7 @@ function exportCSV() {
       csvCell(v ? `${v.name} ${v.plate || ''}`.trim() : ''), n(e.total), n(e.fuel?.liters), n(e.fuel?.pricePerLiter), n(e.fuel?.km),
       csvCell(e.fuel?.fuelType), csvCell(e.notes)].join(';');
   });
-  download(new Blob(['﻿' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `cheltuieli-${todayISO()}.csv`);
+  download(new Blob(['﻿' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `fiscan-cheltuieli-${todayISO()}.csv`);
 }
 
 function exportItemsCSV() {
@@ -1331,7 +1527,7 @@ function exportItemsCSV() {
   const rows = allItems().sort((a, b) => a.e.date.localeCompare(b.e.date)).map((i) => [
     csvCell(i.e.date), csvCell(i.e.store), csvCell(i.name), csvCell(groupOf(i.sub).name.replace(/^\S+\s/, '')), csvCell(subcatByKey(i.sub).name), n(i.qty), n(i.unitPrice), n(i.amount),
     csvCell(catById(i.e.categoryId)?.name), csvCell(projById(i.e.projectId)?.name), i.e.isReturn ? 'da' : ''].join(';'));
-  download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `produse-${todayISO()}.csv`);
+  download(new Blob(['\ufeff' + [head.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8' }), `fiscan-produse-${todayISO()}.csv`);
 }
 
 const blobToDataURL = (b) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(b); });
@@ -1381,14 +1577,17 @@ async function exportJSON() {
   for (const s of DATA_STORES) {
     out[s] = await Promise.all(state[s].map(async (o) => {
       const copy = { ...o };
+      delete copy.thumb; // se refac la restaurare
       if (o.image instanceof Blob) copy.image = await blobToDataURL(o.image);
       if (Array.isArray(o.extraImages)) copy.extraImages = await Promise.all(o.extraImages.map(blobToDataURL));
       return copy;
     }));
   }
+  // ce a învățat aplicația din corecturi (nume produse, subcategorii, magazine, firme verificate)
+  out.learned = { itemRules: state.itemRules, itemNames: state.itemNames, storeRules: state.storeRules, cuiCache: state.cuiCache };
   let json = JSON.stringify(out);
   if (pw) json = JSON.stringify(await encryptText(json, pw));
-  download(new Blob([json], { type: 'application/json' }), `backup-bonuri-${todayISO()}${pw ? '-criptat' : ''}.json`);
+  download(new Blob([json], { type: 'application/json' }), `fiscan-backup-${todayISO()}${pw ? '-criptat' : ''}.json`);
 }
 
 const MAX_BACKUP_BYTES = 300e6;
@@ -1427,8 +1626,14 @@ async function importJSON() {
           ok++;
         }
       }
+      const L = data.learned && typeof data.learned === 'object' ? data.learned : {};
+      await db.put('meta', { id: 'itemRules', rules: sanitizeRules({ ...sanitizeRules(L.itemRules), ...state.itemRules }) });
+      await db.put('meta', { id: 'itemNames', data: sanitizeItemNames({ ...sanitizeItemNames(L.itemNames), ...state.itemNames }) });
+      await db.put('meta', { id: 'storeRules', rules: sanitizeStoreRules({ ...sanitizeStoreRules(L.storeRules), ...state.storeRules }) });
+      await db.put('meta', { id: 'cuiCache', data: sanitizeCuiCache({ ...sanitizeCuiCache(L.cuiCache), ...state.cuiCache }) });
       await loadAll();
       render();
+      backfillThumbs().catch(() => {});
       toast(`Backup restaurat ✔ (${ok} înregistrări${skipped ? `, ${skipped} ignorate` : ''})`);
     } catch (e) { alert('Eroare: ' + (e.message || 'fișier invalid')); }
   };
@@ -1504,6 +1709,14 @@ const actions = {
   'prod-sub': (el) => { state.prodFilter.sub = state.prodFilter.sub === el.dataset.sub ? '' : el.dataset.sub; state.view = 'receipts'; state.receiptsMode = 'products'; render(); },
   'export-json': exportJSON,
   'import-json': importJSON,
+  'more-receipts': () => { state.listLimit += 100; render(); },
+  'show-to-check': () => { state.view = 'receipts'; state.receiptsMode = 'bills'; state.filter = { q: '', cat: '', proj: '', month: '', check: true }; render(); window.scrollTo(0, 0); },
+  'print-receipts': () => {
+    const list = filteredExpenses();
+    const photos = list.length <= 40;
+    if (!photos) toast('Multe bonuri: le pregătesc fără poze. Filtrează pe o lună ca să apară și pozele.');
+    printReceipts(list, { title: 'Bonuri' + (state.filter.month ? ' ' + state.filter.month : ''), photos, urlOf: blobURL });
+  },
   wipe,
   ask: (el) => { state.ask = el.dataset.q; state.view = 'home'; doAsk(); },
 };
@@ -1515,7 +1728,7 @@ function doAsk() {
 
 document.addEventListener('click', (ev) => {
   const nav = ev.target.closest('nav.tabs button');
-  if (nav) { state.view = nav.dataset.view; render(); window.scrollTo(0, 0); return; }
+  if (nav) { state.view = nav.dataset.view; state.listLimit = 100; render(); window.scrollTo(0, 0); return; }
   const el = ev.target.closest('[data-action]');
   if (!el || !actions[el.dataset.action]) return;
   if (el.type === 'checkbox') { actions[el.dataset.action](el); return; }
@@ -1540,15 +1753,17 @@ document.addEventListener('submit', async (ev) => {
 
 document.addEventListener('input', (ev) => {
   const id = ev.target.id;
-  if (id === 'f-q') { state.filter.q = ev.target.value; rerenderKeepFocus(id); }
+  if (id === 'f-q') { state.filter.q = ev.target.value; state.listLimit = 100; rerenderKeepFocus(id); }
   if (id === 'p-q') { state.prodFilter.q = ev.target.value; rerenderKeepFocus(id); }
   if (id === 'i-q') { state.invFilter.q = ev.target.value; rerenderKeepFocus(id); }
 });
 document.addEventListener('change', (ev) => {
   const id = ev.target.id;
+  if (/^f-/.test(id)) state.listLimit = 100;
   if (id === 'f-cat') state.filter.cat = ev.target.value;
   else if (id === 'f-proj') state.filter.proj = ev.target.value;
   else if (id === 'f-month') state.filter.month = ev.target.value;
+  else if (id === 'f-check') state.filter.check = ev.target.checked;
   else if (id === 'p-month') state.prodFilter.month = ev.target.value;
   else if (id === 'p-sub') state.prodFilter.sub = ev.target.value;
   else if (id === 'i-status') state.invFilter.status = ev.target.value;
@@ -1585,6 +1800,7 @@ async function start() {
   render();
   checkReminders();
   setInterval(checkReminders, 3600 * 1000);
+  setTimeout(() => backfillThumbs().catch(() => {}), 1500);
 }
 
 start();

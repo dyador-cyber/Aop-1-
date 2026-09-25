@@ -94,3 +94,20 @@ test('reguli magazin: doar CUI valid -> nume scurt', async () => {
   assert.deepEqual(sanitizeStoreRules({ RO17777320: 'Hornbach', '__proto__': 'x', 'abc': 'y', '1234567': '  <b>Test</b>  ', RO1: 'z', RO7654321: '' }),
     { RO17777320: 'Hornbach', 1234567: '<b>Test</b>' });
 });
+
+test('ANAF: răspuns citit tolerant; cache validat', async () => {
+  const { parseAnafResponse } = await import('../js/anaf.js');
+  const { sanitizeCuiCache } = await import('../js/sanitize.js');
+  const v8 = { cod: 200, message: 'SUCCESS', found: [{ date_generale: { cui: 29226198, denumire: 'LISSE MARKET SRL', adresa: 'MUN. BUCUREŞTI, SECTOR 2, STR. LANTERNEI, NR.72A' } }], notFound: [] };
+  assert.deepEqual(parseAnafResponse(v8), { name: 'LISSE MARKET SRL', address: 'MUN. BUCUREŞTI, SECTOR 2, STR. LANTERNEI, NR.72A' });
+  assert.deepEqual(parseAnafResponse({ found: [{ denumire: 'X SRL', adresa: 'Y' }] }), { name: 'X SRL', address: 'Y' });
+  assert.equal(parseAnafResponse({ found: [], notFound: [123] }), null);
+  assert.equal(parseAnafResponse('<html>'), null);
+  const c = sanitizeCuiCache({ RO29226198: { name: '<b>LISSE</b>', ok: true, checkedAt: 5 }, '__proto__': { name: 'x' }, abc: { name: 'y' } });
+  assert.deepEqual(Object.keys(c), ['RO29226198']);
+  assert.equal(c.RO29226198.name, '<b>LISSE</b>'); // e escapat la afișare
+  const e = sanitize('expenses', { id: 'e', date: '2026-09-25', cif: 'RO29226198"><x', supplierName: 'A'.repeat(500), supplierSource: 'hack' });
+  assert.equal(e.cif, '');
+  assert.equal(e.supplierName.length, 120);
+  assert.equal(e.supplierSource, '');
+});

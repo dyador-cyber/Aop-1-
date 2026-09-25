@@ -1,7 +1,7 @@
 # Securitate
 
 ## Model
-- **Fără server, fără cont, fără AI.** Datele stau doar pe telefon (IndexedDB), în zona izolată a browserului pentru această adresă. Nimic nu este trimis nicăieri.
+- **Fără server, fără cont, fără AI.** Datele stau doar pe telefon (IndexedDB), în zona izolată a browserului pentru această adresă. Singura excepție: **codul fiscal (CUI) al firmei de pe bon** și data sunt trimise la serviciul public ANAF (`webservicesp.anaf.ro`) ca să aflăm denumirea oficială și adresa firmei – o singură dată pe CUI, fără cookie-uri și fără referrer. Produsele, sumele și pozele nu pleacă niciodată din telefon.
 - **„Prompt injection” nu se aplică:** aplicația nu folosește niciun model AI. Întrebările („cât m-a costat casa?”) sunt interpretate de cod fix (`js/parsers.js`), care doar caută cuvinte în datele tale; textul nu este executat și nu poate da „comenzi”. Dacă în viitor se adaugă un asistent AI, textul de pe bonuri trebuie tratat ca date, niciodată ca instrucțiuni.
 - **Conexiune:** doar HTTPS (GitHub Pages). Singura descărcare externă sunt datele de limbă pentru OCR (fișiere de date, nu cod) de pe cdn.jsdelivr.net, o singură dată.
 

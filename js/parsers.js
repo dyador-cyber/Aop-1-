@@ -36,7 +36,44 @@ function amountsIn(line) {
 
 const FUEL_WORDS = /\b(motorina|benzina|diesel|gpl|efix|maxx?motion|ultimate|euro ?diesel|euro ?super|premium ?95|standard ?95|carburant)\b/;
 
-const HEADER_NOISE = /\b(bon|ron)\s*(ne)?f[it]?[it]?scal|fiscal|nefiscal|bine ati venit|welcome/;
+const HEADER_NOISE = /\b(bon|ron)\s*(ne)?f[it]?[it]?scal|fiscal|nefiscal|bine ati venit|welcome|reluare|printare|reimprimare|duplicat|copie|client\b|casa\b|bon vanzare/;
+
+// Forma juridică la finalul rândului (și citită greșit: „S. R. L.”, „SRI”, „5RL”, „S.R.L.-D”)
+const LEGAL_FORM = /\b(s\.?\s?r\.?\s?[l1i](\.?\s?-?\s?d)?|5\.?\s?r\.?\s?l|s\.?\s?a|s\.?\s?c\.?\s?s|s\.?\s?n\.?\s?c|s\.?\s?c\.?\s?a|p\.?\s?f\.?\s?a|i\.?\s?[il]|i\.?\s?f|ong|asociatia|cooperativa)\s*\.?\s*$/i;
+
+// Validarea CUI/CIF românesc cu cifra de control (cheia 753217532).
+export function validCui(cui) {
+  const d = String(cui || '').replace(/^\s*R\s*O\s*/i, '').replace(/\s/g, '');
+  if (!/^\d{2,10}$/.test(d)) return false;
+  const body = d.slice(0, -1).padStart(9, '0');
+  const key = '753217532';
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += +body[i] * +key[i];
+  let ctrl = (sum * 10) % 11;
+  if (ctrl === 10) ctrl = 0;
+  return ctrl === +d.slice(-1);
+}
+
+// Dacă CUI-ul citit nu trece verificarea, încearcă o singură cifră confundată de OCR (1/7, 3/8, 5/6, 0/8…);
+// acceptă corectura doar dacă e unică.
+const CONFUSED = { 0: '86', 1: '7', 2: '7', 3: '8', 5: '6', 6: '58', 7: '12', 8: '0369', 9: '8' };
+export function repairCui(digits) {
+  if (validCui(digits)) return digits;
+  const found = new Set();
+  for (let i = 0; i < digits.length; i++) {
+    for (const c of CONFUSED[digits[i]] || '') {
+      const v = digits.slice(0, i) + c + digits.slice(i + 1);
+      if (validCui(v)) found.add(v);
+    }
+  }
+  return found.size === 1 ? [...found][0] : '';
+}
+
+// Nume scurt din denumirea oficială: fără forma juridică, cu majusculă doar la început de cuvânt.
+export function shortCompanyName(name) {
+  const t = String(name || '').replace(/^\s*s\.?\s?c\.?\s+/i, '').replace(LEGAL_FORM, '').replace(/\b(com|impex|trading|group|grup)\b\.?/gi, ' ').replace(/[^\p{L}\p{N}&.\- ]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  return t.toLowerCase().replace(/(^|[\s\-.&])(\p{L})/gu, (m, a, b) => a + b.toUpperCase()).slice(0, 40);
+}
 
 // Magazine cunoscute: numele afișat (uniform, util la analize) și cuvântul după care îl recunoaștem
 const BRANDS = [
@@ -125,24 +162,53 @@ export function parseReceipt(text, today = new Date(), { storeRules = {} } = {})
   const raw = String(text || '');
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const norm = normalize(raw);
-  const result = { store: '', date: '', total: null, cif: '', fuel: null, suggestedCategoryKey: null, isReturn: false };
+  const result = { store: '', storeOfficial: '', date: '', total: null, cif: '', cifValid: false, fuel: null, suggestedCategoryKey: null, isReturn: false };
 
   // Magazin: linia cu SRL/SA sau un magazin cunoscut; altfel prima linie „curată” din antet
   const letters = (l) => (l.match(/[A-Za-zĂÂÎȘȚăâîșț]/g) || []).length;
   const isNoise = (l) => letters(l) < 4 || letters(l) / l.replace(/\s/g, '').length < 0.6 || HEADER_NOISE.test(normalize(l));
-  const head = lines.slice(0, 12);
-  const storeLine = head.find((l) => /\b(s\.?\s?r\.?\s?l|s\.?\s?a)\b\.?/i.test(l) && !isNoise(l))
-    || head.find((l) => STORE_HINTS.some((h) => h.words.some((w) => normalize(l).includes(w.trim()))))
-    || head.find((l) => !isNoise(l));
-  // magazinul: regula învățată / CUI cunoscut > nume recunoscut > primul rând „curat”
-  const brand = brandFromCif(lines.slice(0, 20).join('\n'), storeRules) || findBrand(lines.slice(0, 15).join('\n'));
-  if (brand) result.store = brand;
-  else if (storeLine) result.store = storeLine.replace(/\s{2,}/g, ' ').trim().slice(0, 60);
+  const head = lines.slice(0, 15);
+  // resturi de OCR la începutul rândului („FE LISSE MARKET SRL”, „| HORNBACH”)
+  const tidy = (l) => {
+    const toks = l.replace(/[|“”"'`~_]+/g, ' ').replace(/\s{2,}/g, ' ').trim().split(' ');
+    while (toks.length > 2 && toks[0].length <= 2 && toks[1].length >= 3) toks.shift();
+    let t = toks.join(' ').replace(/^[\s.,:;*#+-]+/, '').trim();
+    // tot ce urmează după forma juridică e zgomot („LISSE MARKET SRL UL”)
+    for (let k = t.length; k > 0; k--) {
+      if (LEGAL_FORM.test(t.slice(0, k)) && /^[\s\W\w]{0,4}$/.test(t.slice(k)) && t.slice(k).trim().length <= 3) { t = t.slice(0, k).trim(); break; }
+    }
+    return t;
+  };
+  // „DATE FIRMA : LISSE MARKET SRL” – cea mai sigură sursă, când există
+  const dateFirma = lines.map((l) => l.match(/date\s*firm[ae]\s*[:.]?\s*(.{3,})$/i)?.[1]).find(Boolean);
+  const storeLine = (dateFirma && tidy(dateFirma))
+    || head.map(tidy).find((l) => LEGAL_FORM.test(l) && !isNoise(l))
+    || head.map(tidy).find((l) => STORE_HINTS.some((h) => h.words.some((w) => normalize(l).includes(w.trim()))))
+    || head.map(tidy).find((l) => !isNoise(l));
 
-  // CIF
-  // „CUI”/„CIF” (OCR citește uneori „I” ca „l”/„1”), cifre posibil despărțite de spații
-  const cif = raw.match(/(?:C\.?\s*[I1l]\.?\s*F|C\.?\s*U\.?\s*[I1l]|COD\s+FISCAL)\.?\s*[:.]?\s*(R\s*[O0]\s*)?(\d(?:\s?\d){3,9})(?!\d)/i);
-  if (cif) result.cif = (cif[1] ? 'RO' : '') + cif[2].replace(/\s/g, '');
+  // CIF: „CUI”/„CIF”/„COD FISCAL” (OCR citește uneori „I” ca „l”/„1”), cu sau fără RO, cifre posibil despărțite de spații
+  for (const m of raw.matchAll(/(?:\bC\.?\s*[I1l]\.?\s*F|\bC\.?\s*U\.?\s*[I1lLr]|COD\s+FISCAL|COD\s+IDENTIFICARE\s+FISCALA)\.?\s*[:.]?\s*(R\s*[O0]\s*)?(\d(?:\s?\d){1,9})(?!\d)/gi)) {
+    const digits = m[2].replace(/\s/g, '');
+    const fixed = repairCui(digits);
+    const pref = m[1] ? 'RO' : '';
+    if (fixed) { result.cif = pref + fixed; result.cifValid = true; result.cifRepaired = fixed !== digits; break; }
+    if (!result.cif) result.cif = pref + digits; // păstrăm prima citire, marcată ca nesigură
+  }
+
+  // magazinul: regula învățată / CUI cunoscut > nume recunoscut > rândul cu forma juridică
+  const brand = brandFromCif(lines.slice(0, 20).join('\n'), storeRules) || findBrand(lines.slice(0, 15).join('\n'));
+  if (storeLine) result.storeOfficial = storeLine.slice(0, 80);
+  if (brand) result.store = brand;
+  // CUI ilizibil, dar magazinul e recunoscut după nume: luăm CUI-ul cunoscut dacă cifrele citite seamănă
+  if (brand && !result.cifValid) {
+    const known = Object.entries({ ...KNOWN_CUI, ...Object.fromEntries(Object.entries(storeRules).map(([k, v]) => [k.replace(/\D/g, ''), v])) })
+      .find(([cui, name]) => name === brand && validCui(cui));
+    const read = result.cif.replace(/\D/g, '');
+    if (known && (!read || levenshtein(read, known[0]) <= 2)) {
+      result.cif = 'RO' + known[0]; result.cifValid = true; result.cifRepaired = !!read && read !== known[0];
+    }
+  }
+  if (!brand && storeLine) result.store = LEGAL_FORM.test(storeLine) ? shortCompanyName(storeLine) : storeLine.slice(0, 60);
 
   // Data
   // Data: bonurile o conțin adesea de mai multe ori, iar OCR-ul poate greși o cifră pe un rând.
@@ -166,10 +232,11 @@ export function parseReceipt(text, today = new Date(), { storeRules = {} } = {})
   for (let i = 0; i < lines.length; i++) {
     const n = normalize(lines[i]);
     // „TOTAL” poate fi citit greșit de OCR ca „ITAL”, „T0TAL”, „OTAL” la început de rând
-    const isTotal = /\bt[o0]tal\b/.test(n) || /^[^a-z0-9]{0,3}[a-z]?[it1l]?[o0]?tal\b\s*[:.]?\s*(lei|ron)?/.test(n);
+    const isTotal = /\bt[o0]tal\b/.test(n) || /^[^a-z0-9]{0,3}[a-z]{0,2}[o0]?[t1il]al\b\s*[:.]?\s*(lei|ron)?/.test(n);
     if (!isTotal || /subtotal|total\s*tva|tva\s*total|total\s*taxe/.test(n)) continue;
-    let nums = amountsIn(lines[i].replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3'));
-    if (!nums.length && lines[i + 1]) nums = amountsIn(lines[i + 1]);
+    const unsign = (l) => l.replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3').replace(/-\s*(?=\d)/g, ' ');
+    let nums = amountsIn(unsign(lines[i]));
+    if (!nums.length && lines[i + 1]) nums = amountsIn(unsign(lines[i + 1]));
     if (nums.length) {
       total = nums[nums.length - 1];
       negative = /-\s*\d[\d .]*[.,]\s?\d{2}\s*\S?\s*$/.test(lines[i]) || (!amountsIn(lines[i]).length && /-\s*\d/.test(lines[i + 1] || ''));
@@ -180,7 +247,7 @@ export function parseReceipt(text, today = new Date(), { storeRules = {} } = {})
   // cifră apare de mai multe ori (ex. „-128,00” citit greșit, „129,00” de 4 ori), o alegem pe aceea.
   if (total != null) {
     const freq = new Map();
-    for (const a of lines.flatMap((l) => amountsIn(l.replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3')))) freq.set(a.toFixed(2), (freq.get(a.toFixed(2)) || 0) + 1);
+    for (const a of lines.flatMap((l) => amountsIn(l.replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3').replace(/-\s*(?=\d)/g, ' ')))) freq.set(a.toFixed(2), (freq.get(a.toFixed(2)) || 0) + 1);
     const t = total.toFixed(2);
     if ((freq.get(t) || 0) <= 1) {
       const oneOff = (a, b) => a.length === b.length && [...a].filter((c, k) => c !== b[k]).length === 1;
@@ -188,9 +255,29 @@ export function parseReceipt(text, today = new Date(), { storeRules = {} } = {})
       if (alt) total = +alt[0];
     }
   }
+  // Suma plătită (CARD / NUMERAR − REST): verifică totalul și îl înlocuiește dacă linia TOTAL e ilizibilă
+  let card = 0; let cash = 0; let change = 0;
+  for (const l of lines) {
+    const n = normalize(l);
+    const nums = amountsIn(l.replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3').replace(/-\s*(?=\d)/g, ' '));
+    if (!nums.length || /\btva\b|total/.test(n)) continue;
+    const v = Math.abs(nums[nums.length - 1]);
+    if (/^\W*(card|visa|mastercard|maestro|plata card|card bancar)\b/.test(n)) card = card || v;
+    else if (/^\W*(numerar|cash)\b/.test(n)) cash = cash || v;
+    else if (/^\W*rest\b/.test(n)) change = change || v;
+  }
+  let paid = card || cash ? +(card + Math.max(0, cash - change)).toFixed(2) : null;
+  // o singură cifră diferită între total și plată e o greșeală de citire, nu o diferență reală
+  if (paid != null && total != null) {
+    const a = Math.abs(total).toFixed(2); const b = paid.toFixed(2);
+    if (a !== b && a.length === b.length && [...a].filter((c, k) => c !== b[k]).length === 1) paid = Math.abs(total);
+  }
+  result.paid = paid;
+  result.totalSource = total != null ? 'total' : paid ? 'plata' : '';
+  if (total == null && paid) total = paid;
   if (total == null) {
-    const all = lines.filter((l) => !/\d{1,2}[./-]\d{1,2}[./-]20\d{2}/.test(l)).flatMap(amountsIn);
-    if (all.length) total = Math.max(...all);
+    const all = lines.filter((l) => !/\d{1,2}[./-]\d{1,2}[./-]20\d{2}/.test(l)).flatMap((l) => amountsIn(l.replace(/(\d)([,.])\s(\d{2})(?!\d)/g, '$1$2$3')));
+    if (all.length) { total = Math.max(...all); result.totalSource = 'estimat'; }
   }
   result.isReturn = negative || isReturnText(raw);
   result.total = total != null && result.isReturn ? -Math.abs(total) : total;

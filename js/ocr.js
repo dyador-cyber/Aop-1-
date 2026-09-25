@@ -1,7 +1,7 @@
 // OCR în browser cu Tesseract.js. Tot codul (JS + WebAssembly) este inclus în aplicație
 // (vendor/tesseract), deci nu se execută cod descărcat de pe alte servere.
 // Singurul lucru descărcat la prima folosire sunt datele de limbă (ron/eng, doar date, nu cod).
-import { binarize, findPaper, crop } from './preprocess.js';
+import { binarize, findPaper, crop, rotate } from './preprocess.js';
 
 const BASE = new URL('../vendor/tesseract/', import.meta.url).href;
 
@@ -55,12 +55,38 @@ async function prepareReceipt(blob, maxSide = 2400) {
   const { data } = ctx.getImageData(0, 0, W, H);
   const box = findPaper(data, W, H) || { x: 0, y: 0, w: W, h: H };
   const bin = binarize(box.w === W && box.h === H ? data : crop(data, W, box), box.w, box.h, { windowFrac: 1 / 16, t: 0.15 });
-  canvas.width = box.w;
-  canvas.height = box.h;
-  ctx.putImageData(new ImageData(bin, box.w, box.h), 0, 0);
-  const out = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
   canvas.width = canvas.height = 1; // eliberează memoria
-  return out || blob;
+  return { data: bin, width: box.w, height: box.h };
+}
+
+async function toPng(data, width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext('2d').putImageData(new ImageData(data, width, height), 0, 0);
+  const out = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  canvas.width = canvas.height = 1;
+  return out;
+}
+
+// Bonul poate fi fotografiat culcat sau cu susul în jos. Citim întâi o bandă mică din mijloc
+// (≈ 1 s): dacă textul se citește bine, orientarea e corectă. Altfel încercăm celelalte orientări
+// și o păstrăm pe cea citită clar mai bine. Bonurile drepte (cele mai multe) nu pierd timp.
+async function pickOrientation(worker, img, onProgress) {
+  const band = (w, h) => ({ left: Math.round(w * 0.1), top: Math.round(h * 0.3), width: Math.round(w * 0.8), height: Math.round(h * 0.2) });
+  const first = await toPng(img.data, img.width, img.height);
+  const c0 = (await worker.recognize(first, { rectangle: band(img.width, img.height) })).data.confidence;
+  if (c0 >= 55) return first;
+  onProgress?.('verific orientarea', 0);
+  let best = { blob: first, conf: c0 };
+  for (const deg of [90, 270, 180]) {
+    const r = rotate(img.data, img.width, img.height, deg);
+    const b = await toPng(r.data, r.width, r.height);
+    const c = (await worker.recognize(b, { rectangle: band(r.width, r.height) })).data.confidence;
+    if (c > best.conf + 5) best = { blob: b, conf: c };
+    if (best.conf >= 65) break;
+  }
+  return best.blob;
 }
 
 // Returnează textul recunoscut din imagine (Blob).
@@ -71,7 +97,8 @@ export async function recognize(blob, { digits = false, onProgress } = {}) {
   let input = blob;
   if (!digits) {
     onProgress?.('pregătesc poza', 0);
-    input = await prepareReceipt(blob).catch(() => blob);
+    const img = await prepareReceipt(blob).catch(() => null);
+    if (img) input = await pickOrientation(worker, img, onProgress).catch(() => blob);
   }
   const { data } = await worker.recognize(input);
   return (data.text || '').slice(0, 20000);

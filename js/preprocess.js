@@ -60,8 +60,10 @@ function otsu(gray) {
 // Returnează { x, y, w, h } sau null dacă nu e un contrast clar.
 export function findPaper(rgba, width, height) {
   const n = width * height;
+  // „albul” unui pixel = canalul cel mai slab: hârtia e albă (R≈G≈B, mari), iar fundalurile
+  // luminoase dar colorate (material bej, lemn) au un canal mai mic și nu sunt confundate cu hârtia
   const gray = new Uint8Array(n);
-  for (let i = 0, j = 0; i < n; i++, j += 4) gray[i] = 0.299 * rgba[j] + 0.587 * rgba[j + 1] + 0.114 * rgba[j + 2];
+  for (let i = 0, j = 0; i < n; i++, j += 4) gray[i] = Math.min(rgba[j], rgba[j + 1], rgba[j + 2]);
   const thr = otsu(gray);
   const col = new Float64Array(width);
   const row = new Float64Array(height);
@@ -101,4 +103,23 @@ export function crop(rgba, width, box) {
     out.set(rgba.subarray(src, src + box.w * 4), y * box.w * 4);
   }
   return out;
+}
+
+// Rotește o imagine RGBA cu 90°, 180° sau 270° (în sensul acelor de ceasornic).
+export function rotate(rgba, width, height, deg) {
+  const d = ((deg % 360) + 360) % 360;
+  if (d === 0) return { data: rgba, width, height };
+  const W = d === 180 ? width : height;
+  const H = d === 180 ? height : width;
+  const out = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let nx; let ny;
+      if (d === 90) { nx = height - 1 - y; ny = x; } else if (d === 180) { nx = width - 1 - x; ny = height - 1 - y; } else { nx = y; ny = width - 1 - x; }
+      const s = (y * width + x) * 4;
+      const t = (ny * W + nx) * 4;
+      out[t] = rgba[s]; out[t + 1] = rgba[s + 1]; out[t + 2] = rgba[s + 2]; out[t + 3] = 255;
+    }
+  }
+  return { data: out, width: W, height: H };
 }

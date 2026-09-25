@@ -229,7 +229,7 @@ test('magazin ilizibil: nume cu litere greșite, CUI cunoscut, regulă învăța
   assert.equal(parseReceipt('zz ilizibil SRL\nCUL: RO1777 7320').store, 'Hornbach');
   assert.equal(parseReceipt('DEDEMA SRL\nx').store, 'Dedeman');
   assert.equal(parseReceipt('ANTET ILIZIBIL SRL\nCUI RO1234567', new Date(), { storeRules: { RO1234567: 'Ferma Popescu' } }).store, 'Ferma Popescu');
-  assert.equal(parseReceipt('MEGA TEST SRL\nCUI RO1234567').store, 'MEGA TEST SRL');
+  assert.equal(parseReceipt('MEGA TEST SRL\nCUI RO1234567').store, 'Mega Test');
   // fără potriviri false
   assert.equal(findBrand('CORBACI LTD'), '');
   assert.equal(findBrand('PROFIL ALUMINIU'), '');
@@ -255,4 +255,27 @@ test('retur recunoscut și din citiri proaste; bonurile normale nu devin retur',
   assert.equal(r.total, 18);
   // rețea electrică / „reteta” nu declanșează
   assert.equal(parseReceipt('X SRL\nCABLU RETEA 20,00\nRETETA 10,00\nTOTAL 30,00', today).isReturn, false);
+});
+
+test('firmă și CUI: rânduri tehnice ignorate, DATE FIRMA, formă juridică, cifra de control', async () => {
+  const { validCui, repairCui, shortCompanyName } = await import('../js/parsers.js');
+  for (const c of ['RO29226198', '17777320', '2816464', '15991149', '22891860']) assert.ok(validCui(c), c);
+  assert.equal(validCui('RO29226197'), false);
+  assert.equal(repairCui('29226198'), '29226198');
+  assert.equal(shortCompanyName('HORNBACH CENTRALA SRL'), 'Hornbach Centrala');
+  assert.equal(shortCompanyName('S.C. ALFA-BETA IMPEX S.R.L.'), 'Alfa-Beta');
+  const today = new Date(2026, 8, 25);
+  let r = parseReceipt('* RELUARE PRINTARE *\nLISSE MARKET SRL\nMUN.BUCURESTI SECTOR 2\nCIF: RO29226198\nDATE FIRMA : LISSE MARKET SRL\nTOTAL LEI 53.90', today);
+  assert.equal(r.store, 'Lisse Market');
+  assert.equal(r.storeOfficial, 'LISSE MARKET SRL');
+  assert.equal(r.cif, 'RO29226198');
+  assert.equal(r.cifValid, true);
+  // text OCR real al bonului Lisse (poză culcată, rotită automat)
+  r = parseReceipt('AN\n4 come PRINTARE + d\nFE LISSE MARKET SRL\noN MUN. BUCURESTI SECTOR 2\n4 CIF: RO29226198 Lo\nNN DATE FIRMA : LISSE MARKET SRL UL\nCARD 53.90 Bf\n2:2002 BF :0092', today);
+  assert.equal(r.store, 'Lisse Market');
+  assert.equal(r.storeOfficial, 'LISSE MARKET SRL');
+  // fără DATE FIRMA: primul rând cu formă juridică, nu „RELUARE PRINTARE”
+  r = parseReceipt('* REIMPRIMARE *\nBON FISCAL\nALFA DISTRIBUTIE S.R.L.\nCUI 1234565', today);
+  assert.equal(r.store, 'Alfa Distributie');
+  assert.equal(r.cifValid, true);
 });
