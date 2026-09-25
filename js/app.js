@@ -3,9 +3,10 @@ import { parseReceipt, parseOdometer, runQuery, isFuelExpense, normalize, shortC
 import { lookupCui } from './anaf.js';
 import { expenseFlags, isUnknownItem } from './checks.js';
 import { productKey, productSituation, fits, pantryStock, sizeTokens } from './stock.js';
-import { shareReceiptPhotos, printReceipts } from './copy.js';
+import { VEHICLE_TYPES, typeOf, meterUnit, parseRegistration, parseTyreSticker, decodeVin, validVin, cleanVin, standardReminders, renewTyre, addYears, SERVICE_DEFAULTS, parseTimeline } from './vehicle.js';
+import { shareReceiptPhotos, printReceipts, printPage } from './copy.js';
 import { recognize, compressImage as compressRaw } from './ocr.js';
-import { sanitize, sanitizeRules, sanitizeInvSubs, sanitizeStoreRules, sanitizeCuiCache, sanitizeItemNames, sanitizeStoreProjects, sanitizePantry, safeImageDataURL, csvCell, icsText } from './sanitize.js';
+import { sanitize, sanitizeRules, sanitizeInvSubs, sanitizeStoreRules, sanitizeCuiCache, sanitizeItemNames, sanitizeStoreProjects, sanitizePantry, sanitizeTrips, safeImageDataURL, csvCell, icsText } from './sanitize.js';
 import { SUBCATS, GROUPS, groupOf, subcatByKey, classifyItem, parseItems, itemKey, toolDoubt } from './items.js';
 import { INV_STATUSES, OWNED, statusByKey, syncFromExpense, undoExpense, findSimilar, addMonths, WARRANTY_MONTHS, splitUnits, nextLabel, lendTool, returnTool, RETURN_STATES } from './inventory.js';
 import { encryptText, decryptText } from './crypto.js';
@@ -25,9 +26,9 @@ const DEFAULT_CATEGORIES = [
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
 // Afișată în Setări: arată dacă telefonul a luat ultima actualizare.
-const APP_VERSION = '2026.09.25-7';
+const APP_VERSION = '2026.09.25-8';
 const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
-const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
+const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie', 'Anvelope', 'Extinctor', 'Trusă prim ajutor', 'Permis / buletin', 'Altul'];
 
 const state = {
   view: 'home',
@@ -46,6 +47,7 @@ const state = {
   itemNames: {},
   storeProjects: {},
   pantry: {},
+  trips: {},
   anafStatus: null,
   period: { key: 'month', from: '', to: '' },
   projectId: null, projCat: '',
@@ -124,6 +126,7 @@ async function loadAll() {
   state.itemNames = sanitizeItemNames((await db.get('meta', 'itemNames'))?.data);
   state.storeProjects = sanitizeStoreProjects((await db.get('meta', 'storeProjects'))?.data);
   state.pantry = sanitizePantry((await db.get('meta', 'pantry'))?.data);
+  state.trips = sanitizeTrips((await db.get('meta', 'trips'))?.data);
   state.projectsSetup = !!(await db.get('meta', 'projectsSetup'))?.done;
   const st = await db.get('meta', 'anafStatus');
   state.anafStatus = st && typeof st.at === 'number' ? { ok: st.ok === true, at: st.at } : null;
@@ -248,13 +251,14 @@ function expenseRow(e, opts) {
   const cat = catById(e.categoryId);
   const proj = projById(e.projectId);
   const img = blobURL(e.thumb || e.image);
-  const fuel = e.fuel?.liters ? ` · ${num(e.fuel.liters)} L` : '';
+  const fuel = e.fuel?.liters ? ` · ${num(e.fuel.liters)} L` : e.fuel?.kwh ? ` · ${num(e.fuel.kwh)} kWh` : '';
   const flags = expenseFlags(e);
   return `<li class="row" data-action="edit-expense" data-id="${esc(e.id)}">
     ${img ? `<img class="thumb" src="${img}" alt="" loading="lazy" decoding="async">` : '<div class="thumb ph">🧾</div>'}
     <div class="grow">
-      <div class="title">${e.isReturn ? '↩️ ' : ''}${esc(e.store || 'Fără nume')}${e.extraImages?.length ? ` <span class="muted small">📄×${e.extraImages.length + 1}</span>` : ''}</div>
+      <div class="title">${e.isReturn ? '↩️ ' : ''}${esc(e.store || (e.fuel?.kwh ? `🔌 Încărcare${e.fuel.place === 'home' ? ' acasă' : ''}` : e.fuel?.liters ? '⛽ Alimentare' : 'Fără nume'))}${e.extraImages?.length ? ` <span class="muted small">📄×${e.extraImages.length + 1}</span>` : ''}</div>
       <div class="sub">${fmtDate(e.date)} · <span class="dot" style="background:${esc(cat?.color || '#999')}"></span>${esc(catLabel(cat) || 'Fără categorie')}${proj ? ` · ${esc(projIcon(proj))} ${esc(proj.name)}` : ''}${fuel}${(e.items || []).some((i) => i.projectId && i.projectId !== e.projectId) ? ' · ✂️ împărțit' : ''}</div>
+      ${e.fuel?.trip ? `<div class="sub">🛣️ ${esc(e.fuel.trip)}</div>` : ''}
       ${e.items?.length ? `<div class="sub items-peek">🧾 ${esc(e.items.slice(0, 4).map((i) => i.name).join(', '))}${e.items.length > 4 ? ` +${e.items.length - 4}` : ''}</div>` : ''}
       ${flags.length ? `<div class="sub warn-text">${flags[0].text.startsWith('❓') ? '' : '⚠️ '}${esc(flags[0].text.replace(/ – .*/, ''))}${flags.length > 1 ? ` (+${flags.length - 1})` : ''}</div>` : ''}
     </div>
@@ -267,10 +271,14 @@ function reminderRow(r) {
   const cls = days < 0 ? 'bad' : days <= 7 ? 'bad' : days <= 30 ? 'warn' : 'ok';
   const txt = days < 0 ? `expirat de ${-days} zile` : days === 0 ? 'expiră azi' : `în ${days} zile`;
   const v = vehById(r.vehicleId);
+  const km = r.dueKm && v ? vehicleStats(v.id).lastKm : null;
+  const u = meterUnit(v) === 'h' ? 'ore' : 'km';
+  const kmTxt = r.dueKm ? ` · la ${num(r.dueKm, 0)} ${u}${km != null ? ` (${r.dueKm - km >= 0 ? `mai sunt ${num(r.dueKm - km, 0)}` : `depășit cu ${num(km - r.dueKm, 0)}`})` : ''}` : '';
+  const kmBad = r.dueKm && km != null && km >= r.dueKm - (u === 'ore' ? 25 : 500);
   return `<li class="row" data-action="edit-reminder" data-id="${esc(r.id)}">
     <div class="grow"><div class="title">${esc(r.title || r.type)}</div>
-    <div class="sub">${v ? '🚗 ' + esc(v.name) + ' · ' : ''}${fmtDate(r.dueDate)}</div></div>
-    <span class="badge ${cls}">${txt}</span></li>`;
+    <div class="sub">${v ? esc(typeOf(v.type).icon) + ' ' + esc(v.name) + ' · ' : ''}${fmtDate(r.dueDate)}${kmTxt}</div></div>
+    <span class="badge ${kmBad ? 'bad' : cls}">${kmBad ? 'revizia e aproape' : txt}</span></li>`;
 }
 
 function breakdown(obj, total) {
@@ -589,8 +597,12 @@ function renderReceipts() {
   ${list.length > state.listLimit ? `<button class="link center-btn" data-action="more-receipts">Arată încă ${Math.min(100, list.length - state.listLimit)} (din ${list.length - state.listLimit} rămase)</button>` : ''}`;
 }
 
+// Cheltuielile unui vehicul: bonurile cu mașina aleasă sau din proiectul vehiculului
+const vehicleExpenses = (vid) => { const pid = vehicleProject(vid)?.id; return state.expenses.filter((e) => e.vehicleId === vid || (pid && e.projectId === pid)); };
+
 function vehicleStats(vid) {
-  const fuel = state.expenses.filter((e) => e.vehicleId === vid && isFuelExpense(e, state)).sort((a, b) => a.date.localeCompare(b.date));
+  const all = vehicleExpenses(vid);
+  const fuel = all.filter((e) => isFuelExpense(e, state)).sort((a, b) => a.date.localeCompare(b.date));
   const readings = [
     ...state.odometer.filter((o) => o.vehicleId === vid).map((o) => ({ date: o.date, km: +o.km })),
     ...fuel.filter((e) => e.fuel?.km).map((e) => ({ date: e.date, km: +e.fuel.km })),
@@ -598,59 +610,99 @@ function vehicleStats(vid) {
   const lastKm = readings.length ? Math.max(...readings.map((r) => r.km)) : null;
   const year = todayISO().slice(0, 4);
   const yearFuel = fuel.filter((e) => e.date.startsWith(year));
-  const withKm = fuel.filter((e) => e.fuel?.km && e.fuel?.liters).sort((a, b) => a.fuel.km - b.fuel.km);
-  let consumption = null;
-  if (withKm.length >= 2) {
+  // consum: între prima și ultima alimentare cu km, fără prima cantitate (plinul de dinainte)
+  const per100 = (key) => {
+    const withKm = fuel.filter((e) => e.fuel?.km && e.fuel?.[key]).sort((a, b) => a.fuel.km - b.fuel.km);
+    if (withKm.length < 2) return null;
     const dist = withKm[withKm.length - 1].fuel.km - withKm[0].fuel.km;
-    const liters = withKm.slice(1).reduce((s, e) => s + +e.fuel.liters, 0);
-    if (dist > 0) consumption = liters / dist * 100;
-  }
-  const carCost = state.expenses.filter((e) => e.vehicleId === vid && e.date.startsWith(year)).reduce((s, e) => s + (+e.total || 0), 0);
+    const q = withKm.slice(1).reduce((a, e) => a + +e.fuel[key], 0);
+    return dist > 0 ? q / dist * 100 : null;
+  };
+  const yr = readings.filter((r) => r.date.startsWith(year));
+  const kmYear = yr.length >= 2 ? Math.max(...yr.map((r) => r.km)) - Math.min(...yr.map((r) => r.km)) : 0;
+  const carCost = all.filter((e) => e.date.startsWith(year)).reduce((a, e) => a + (+e.total || 0), 0);
+  const energyCost = yearFuel.reduce((a, e) => a + (+e.total || 0), 0);
+  const kwhYear = yearFuel.reduce((a, e) => a + (+e.fuel?.kwh || 0), 0);
+  const homeKwh = yearFuel.filter((e) => e.fuel?.place === 'home').reduce((a, e) => a + (+e.fuel?.kwh || 0), 0);
   return {
-    fuel, readings, lastKm, consumption, carCost,
-    yearLiters: yearFuel.reduce((s, e) => s + (+e.fuel?.liters || 0), 0),
-    yearFuelCost: yearFuel.reduce((s, e) => s + (+e.total || 0), 0),
+    fuel, readings, lastKm, carCost, kmYear,
+    consumption: per100('liters'), kwh100: per100('kwh'),
+    yearLiters: yearFuel.reduce((a, e) => a + (+e.fuel?.liters || 0), 0), kwhYear,
+    yearFuelCost: energyCost,
+    cost100: kmYear >= 100 ? carCost / kmYear * 100 : null,
+    energy100: kmYear >= 100 ? energyCost / kmYear * 100 : null,
+    homeShare: kwhYear ? Math.round(homeKwh / kwhYear * 100) : null,
   };
 }
 
 function renderCar() {
   if (!state.vehicles.length) {
-    return `<section class="card center"><p>Adaugă mașina ta ca să urmărești combustibilul, kilometrii și expirările.</p>
-      <button class="primary" data-action="new-vehicle">+ Adaugă mașină</button></section>
+    return `<section class="card center"><p>Adaugă vehiculul (mașină, electrică, motocicletă sau utilaj) ca să urmărești consumul, kilometrii și expirările.</p>
+      <button class="primary" data-action="new-vehicle">+ Adaugă vehicul</button></section>
       ${renderRemindersCard(state.reminders)}`;
   }
   const vid = state.vehicleId;
   const v = vehById(vid);
+  const t = typeOf(v?.type);
+  const unit = t.meter === 'h' ? 'ore' : 'km';
   const s = vehicleStats(vid);
   const rems = state.reminders.filter((r) => r.vehicleId === vid || !r.vehicleId);
   const odo = state.odometer.filter((o) => o.vehicleId === vid).sort((a, b) => b.date.localeCompare(a.date) || b.km - a.km);
+  const year = todayISO().slice(0, 4);
+  const desc = [v?.make, v?.model, v?.year || (v?.firstReg || '').slice(0, 4)].filter(Boolean).join(' ');
   return `
-  <section class="card">
+  <section class="card veh-head">
     <div class="row-flex">
-      <select id="veh-select">${state.vehicles.map((x) => `<option value="${esc(x.id)}" ${x.id === vid ? 'selected' : ''}>${esc(x.name)} ${x.plate ? '(' + esc(x.plate) + ')' : ''}</option>`).join('')}</select>
-      <button data-action="edit-vehicle" data-id="${esc(vid)}">✏️</button>
-      <button data-action="new-vehicle">+</button>
+      <select id="veh-select">${state.vehicles.map((x) => `<option value="${esc(x.id)}" ${x.id === vid ? 'selected' : ''}>${esc(typeOf(x.type).icon)} ${esc(x.name)} ${x.plate ? '(' + esc(x.plate) + ')' : ''}</option>`).join('')}</select>
+      <button class="icon-btn" data-action="edit-vehicle" data-id="${esc(vid)}" aria-label="Editează">✏️</button>
+      <button class="icon-btn" data-action="new-vehicle" aria-label="Vehicul nou">＋</button>
     </div>
-    <div class="kpis">
-      <div><b>${s.lastKm != null ? num(s.lastKm, 0) : '—'}</b><span>km la bord</span></div>
-      <div><b>${s.consumption ? num(s.consumption) : '—'}</b><span>L / 100 km</span></div>
-      <div><b>${num(s.yearLiters)} L</b><span>carburant ${todayISO().slice(0, 4)}</span></div>
-      <div><b>${money(s.yearFuelCost)}</b><span>carburant ${todayISO().slice(0, 4)}</span></div>
-      <div><b>${money(s.carCost)}</b><span>total mașină ${todayISO().slice(0, 4)}</span></div>
-    </div>
+    <div class="veh-id"><span class="tile-icon sm">${esc(t.icon)}</span><div><b>${esc(desc || v?.name || '')}</b><div class="muted small">${esc(t.name)}${v?.plate ? ' · ' + esc(v.plate) : ''}</div></div></div>
+  </section>
+  <section class="stat-row">
+    <div class="stat"><b>${s.lastKm != null ? num(s.lastKm, 0) : '—'}</b><span>${t.meter === 'h' ? 'ore motor' : 'km la bord'}</span></div>
+    ${t.energy !== 'electric' && t.meter !== 'h' ? `<div class="stat"><b>${s.consumption ? num(s.consumption) : '—'}</b><span>L / 100 km</span></div>` : ''}
+    ${t.energy !== 'fuel' ? `<div class="stat"><b>${s.kwh100 ? num(s.kwh100) : '—'}</b><span>kWh / 100 km</span></div>` : ''}
+    ${t.meter !== 'h' ? `<div class="stat"><b>${s.cost100 != null ? money(s.cost100) : '—'}</b><span>cost total / 100 km</span></div>` : `<div class="stat"><b>${num(s.yearLiters)} L</b><span>carburant ${year}</span></div>`}
+    <div class="stat"><b>${money(s.carCost)}</b><span>total ${year}</span></div>
+    ${t.energy !== 'fuel' && s.homeShare != null ? `<div class="stat"><b>${s.homeShare}%</b><span>încărcat acasă</span></div>` : ''}
   </section>
   <section class="quick">
-    <button class="big-btn" data-action="new-fuel">⛽<span>Alimentare</span></button>
+    ${t.energy !== 'electric' ? '<button class="big-btn" data-action="new-fuel">⛽<span>Alimentare</span></button>' : ''}
+    ${t.energy !== 'fuel' ? '<button class="big-btn" data-action="new-charge">🔌<span>Încărcare</span></button>' : ''}
     <button class="big-btn" data-action="photo-odometer">📷<span>Poză bord</span></button>
-    <button class="big-btn" data-action="new-odometer">🔢<span>Km manual</span></button>
+    <button class="big-btn" data-action="new-odometer">🔢<span>${t.meter === 'h' ? 'Ore manual' : 'Km manual'}</span></button>
+  </section>
+  <section class="card doc-btns">
+    <button data-action="veh-sheet">📄 Fișă tehnică</button>
+    <button data-action="veh-history">📜 Istoric pentru vânzare</button>
+    ${t.meter === 'km' ? '<button data-action="veh-timeline">🗺️ Drumuri din Google Timeline</button>' : ''}
   </section>
   ${renderRemindersCard(rems, vid)}
-  <section class="card"><h3>⛽ Alimentări ${esc(v?.name || '')}</h3>
-    <ul class="list">${s.fuel.slice().reverse().slice(0, 50).map(expenseRow).join('') || '<li class="muted pad">Nicio alimentare.</li>'}</ul></section>
-  <section class="card"><h3>🔢 Kilometraj</h3>
+  ${renderTripsCard(vid)}
+  <section class="card"><h3>${t.energy === 'electric' ? '🔌 Încărcări' : '⛽ Alimentări'} ${esc(v?.name || '')}</h3>
+    <ul class="list">${s.fuel.slice().reverse().slice(0, 50).map((e) => expenseRow(e)).join('') || '<li class="muted pad">Nimic încă.</li>'}</ul></section>
+  <section class="card"><h3>🔢 ${t.meter === 'h' ? 'Ore de funcționare' : 'Kilometraj'}</h3>
     <ul class="list">${odo.slice(0, 50).map((o) => `<li class="row" data-action="edit-odometer" data-id="${esc(o.id)}">
       ${o.image ? `<img class="thumb" src="${imgURL(o)}" alt="">` : '<div class="thumb ph">🔢</div>'}
-      <div class="grow"><div class="title">${num(o.km, 0)} km</div><div class="sub">${fmtDate(o.date)}${o.notes ? ' · ' + esc(o.notes) : ''}</div></div></li>`).join('') || '<li class="muted pad">Nicio citire.</li>'}</ul></section>`;
+      <div class="grow"><div class="title">${num(o.km, 0)} ${unit}</div><div class="sub">${fmtDate(o.date)}${o.notes ? ' · ' + esc(o.notes) : ''}</div></div></li>`).join('') || '<li class="muted pad">Nicio citire.</li>'}</ul></section>`;
+}
+
+// Kilometrii din Google Timeline: doar totaluri pe zi, fără locuri
+function renderTripsCard(vid) {
+  const days = state.trips[vid];
+  if (!days || !Object.keys(days).length) return '';
+  const t = todayISO();
+  const sum = (pred) => Object.entries(days).filter(([d]) => pred(d)).reduce((a, [, km]) => a + km, 0);
+  const d30 = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const months = [];
+  for (let i = 5; i >= 0; i--) { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - i); months.push(d.toISOString().slice(0, 7)); }
+  const per = months.map((m) => ({ m, km: sum((d) => d.startsWith(m)) }));
+  const max = Math.max(1, ...per.map((x) => x.km));
+  return `<section class="card"><h3>🗺️ Drumuri (Google Timeline)</h3>
+    <div class="stat-row mini"><div class="stat"><b>${num(sum((d) => d >= d30), 0)} km</b><span>ultimele 30 de zile</span></div><div class="stat"><b>${num(sum((d) => d.startsWith(t.slice(0, 4))), 0)} km</b><span>anul acesta</span></div></div>
+    <div class="month-bars">${per.map((x) => `<div><span style="height:${Math.round(x.km / max * 100)}%"></span><small>${esc(x.m.slice(5))}</small><small>${num(x.km, 0)}</small></div>`).join('')}</div>
+    <p class="muted small">Se păstrează doar km pe zi, fără locuri sau trasee.</p></section>`;
 }
 
 function renderRemindersCard(rems, vid = '') {
@@ -658,6 +710,7 @@ function renderRemindersCard(rems, vid = '') {
   return `<section class="card"><div class="row-flex"><h3 class="grow">📅 Asigurări, ITP, expirări</h3>
     <button data-action="new-reminder" data-vehicle="${esc(vid)}">+ Adaugă</button></div>
     <ul class="list">${sorted.map(reminderRow).join('') || '<li class="muted pad">Adaugă data de expirare RCA, ITP, rovinietă… și primești notificare înainte.</li>'}</ul>
+    ${vid ? '<button class="link" data-action="std-reminders">➕ Adaugă expirările obișnuite (extinctor, trusă, revizie, anvelope…)</button>' : ''}
     ${sorted.length ? '<button class="link" data-action="ics-all">📆 Adaugă toate în calendarul telefonului (.ics)</button>' : ''}
   </section>`;
 }
@@ -752,14 +805,23 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     <div id="car-block" class="${cat?.isCar || exp.vehicleId ? '' : 'hidden'}">
       <label>Mașina<select name="vehicleId">${options(state.vehicles, exp.vehicleId)}</select></label>
     </div>
-    <fieldset id="fuel-block" class="${cat?.isFuel || exp.fuel?.liters ? '' : 'hidden'}"><legend>⛽ Alimentare</legend>
-      <div class="grid3">
+    <fieldset id="fuel-block" class="${cat?.isFuel || exp.fuel?.liters || exp.fuel?.kwh ? '' : 'hidden'}"><legend id="fuel-legend">⛽ Alimentare</legend>
+      <div class="seg small-seg" id="energy-seg">
+        <button type="button" data-energy="fuel">⛽ Carburant</button><button type="button" data-energy="electric">🔌 Curent</button>
+      </div>
+      <div class="grid3 e-fuel">
         <label>Litri<input name="liters" inputmode="decimal" value="${esc(exp.fuel?.liters ?? '')}"></label>
         <label>Preț / L<input name="ppl" inputmode="decimal" value="${esc(exp.fuel?.pricePerLiter ?? '')}"></label>
-        <label>Km la bord<input name="km" inputmode="numeric" value="${esc(exp.fuel?.km ?? '')}"></label>
+        <label><span class="meter-label">Km la bord</span><input name="km" inputmode="numeric" value="${esc(exp.fuel?.km ?? '')}"></label>
       </div>
-      <label>Tip carburant<input name="fuelType" list="fuel-types" value="${esc(exp.fuel?.fuelType || '')}"></label>
-      <datalist id="fuel-types"><option>benzină</option><option>motorină</option><option>GPL</option><option>electric (kWh)</option></datalist>
+      <div class="grid3 e-elec">
+        <label>kWh<input name="kwh" inputmode="decimal" value="${esc(exp.fuel?.kwh ?? '')}"></label>
+        <label>Preț / kWh<input name="ppk" inputmode="decimal" value="${esc(exp.fuel?.pricePerKwh ?? '')}"></label>
+        <label>Unde<select name="place"><option value="public" ${exp.fuel?.place === 'public' ? 'selected' : ''}>Stație publică</option><option value="home" ${exp.fuel?.place === 'home' ? 'selected' : ''}>Acasă</option></select></label>
+      </div>
+      <label class="e-fuel">Tip carburant<input name="fuelType" list="fuel-types" value="${esc(exp.fuel?.fuelType || '')}"></label>
+      <datalist id="fuel-types"><option>benzină</option><option>motorină</option><option>GPL</option></datalist>
+      <label>Notă drum (opțional)<input name="trip" maxlength="200" value="${esc(exp.fuel?.trip || '')}" placeholder="ex.: București – Brașov, cu remorca"></label>
     </fieldset>
     <details id="items-box" ${exp.items?.length || (!isNew && exp.image) ? 'open' : ''}><summary>🧾 Produse (<span id="items-count">0</span>) <span id="items-sum" class="muted small"></span></summary>
       <div id="items-list"></div>
@@ -791,16 +853,36 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     const syncBlocks = () => {
       const c = catById(form.categoryId.value);
       $('#car-block', root).classList.toggle('hidden', !(c?.isCar || form.vehicleId.value));
-      $('#fuel-block', root).classList.toggle('hidden', !(c?.isFuel || form.liters.value));
+      $('#fuel-block', root).classList.toggle('hidden', !(c?.isFuel || form.liters.value || form.kwh.value));
+      syncEnergy();
       if (c?.isCar && !form.vehicleId.value && state.vehicles.length) form.vehicleId.value = state.vehicleId || state.vehicles[0].id;
       if (c?.isCar && !form.projectId.value && !touched.has('projectId')) form.projectId.value = vehicleProject(form.vehicleId.value)?.id || '';
     };
+    // carburant sau curent (electric / hibrid); la utilaje „ore motor” în loc de km
+    let energy = exp.energyMode || (exp.fuel?.kwh ? 'electric' : exp.fuel?.liters ? 'fuel' : '');
+    const syncEnergy = () => {
+      const v = vehById(form.vehicleId.value);
+      const t = typeOf(v?.type);
+      const mode = energy || (t.energy === 'electric' ? 'electric' : 'fuel');
+      root.querySelectorAll('.e-fuel').forEach((el) => el.classList.toggle('hidden', mode !== 'fuel'));
+      root.querySelectorAll('.e-elec').forEach((el) => el.classList.toggle('hidden', mode !== 'electric'));
+      $('#energy-seg', root).classList.toggle('hidden', !(t.energy === 'both' || !v));
+      root.querySelectorAll('#energy-seg button').forEach((b) => b.classList.toggle('on', b.dataset.energy === mode));
+      $('#fuel-legend', root).textContent = mode === 'electric' ? '🔌 Încărcare' : '⛽ Alimentare';
+      $('.meter-label', root).textContent = t.meter === 'h' ? 'Ore motor' : 'Km la bord';
+      // kilometrii se scriu și la încărcare: îi mutăm în grila vizibilă
+      const kmLabel = form.km.closest('label');
+      (mode === 'electric' ? root.querySelector('.e-elec') : root.querySelector('.e-fuel')).appendChild(kmLabel);
+    };
+    $('#energy-seg', root).addEventListener('click', (ev) => { const b = ev.target.closest('[data-energy]'); if (b) { energy = b.dataset.energy; syncEnergy(); } });
+    syncEnergy();
     form.categoryId.addEventListener('change', syncBlocks);
     // mașina și proiectul ei merg împreună
     form.vehicleId.addEventListener('change', () => {
       const vp = vehicleProject(form.vehicleId.value);
       const cur = projById(form.projectId.value);
       if (vp && (!cur || cur.kind === 'vehicle')) form.projectId.value = vp.id;
+      syncEnergy();
     });
     form.projectId.addEventListener('change', () => {
       touched.add('projectId');
@@ -814,6 +896,13 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       else if (l && p && !t) form.total.value = (l * p).toFixed(2);
     };
     form.liters.addEventListener('change', recalc);
+    const recalcKwh = () => {
+      const k = toNum(form.kwh.value); const p = toNum(form.ppk.value); const t = toNum(form.total.value);
+      if (k && t && !touched.has('ppk')) form.ppk.value = (t / k).toFixed(2);
+      else if (k && p && !t) form.total.value = (k * p).toFixed(2);
+    };
+    form.kwh.addEventListener('change', recalcKwh);
+    form.ppk.addEventListener('change', recalcKwh);
     form.total.addEventListener('change', recalc);
 
     // ---- firma: denumire oficială, CUI, adresă (verificate automat la ANAF)
@@ -1215,10 +1304,12 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
 }
 
 function readExpenseForm(form, exp) {
-  const liters = toNum(form.liters.value);
+  const elec = !form.kwh.closest('.e-elec').classList.contains('hidden');
+  const liters = elec ? null : toNum(form.liters.value);
+  const kwh = elec ? toNum(form.kwh.value) : null;
   const km = toNum(form.km.value);
   const cat = catById(form.categoryId.value);
-  const hasFuel = liters || cat?.isFuel;
+  const hasFuel = liters || kwh || cat?.isFuel;
   let total = toNum(form.total.value);
   const isReturn = form.isReturn.checked || (total != null && total < 0);
   if (total != null) total = isReturn ? -Math.abs(total) : Math.abs(total);
@@ -1235,7 +1326,10 @@ function readExpenseForm(form, exp) {
     categoryId: form.categoryId.value,
     projectId: form.projectId.value,
     vehicleId: form.vehicleId.value,
-    fuel: hasFuel ? { liters, pricePerLiter: toNum(form.ppl.value), km, fuelType: form.fuelType.value.trim() } : null,
+    fuel: hasFuel ? {
+      liters, pricePerLiter: elec ? null : toNum(form.ppl.value), km, fuelType: elec ? 'electric' : form.fuelType.value.trim(),
+      kwh, pricePerKwh: elec ? toNum(form.ppk.value) : null, place: elec ? form.place.value : '', trip: form.trip.value.trim(),
+    } : null,
     notes: form.notes.value.trim(),
     ocrText: form.ocrText.value,
     createdAt: exp.createdAt || Date.now(),
@@ -1643,10 +1737,10 @@ function openOdometer(o, { runOcr = false } = {}) {
   <form id="odo-form" class="form">
     ${o.image ? `<img class="preview" src="${imgURL(o)}" alt="bord">` : ''}
     <div id="ocr-status" class="ocr ${runOcr ? '' : 'hidden'}">🔍 Citesc cifrele…</div>
-    <label>Mașina<select name="vehicleId" required>${options(state.vehicles, o.vehicleId, '— alege —')}</select></label>
+    <label>Vehiculul<select name="vehicleId" required>${options(state.vehicles, o.vehicleId, '— alege —')}</select></label>
     <div class="grid2">
       <label>Data<input name="date" type="date" value="${esc(o.date)}" required></label>
-      <label>Km<input name="km" inputmode="numeric" value="${esc(o.km ?? '')}" required></label>
+      <label>${meterUnit(vehById(o.vehicleId)) === 'h' ? 'Ore motor' : 'Km'}<input name="km" inputmode="numeric" value="${esc(o.km ?? '')}" required></label>
     </div>
     <label>Notițe<input name="notes" value="${esc(o.notes || '')}"></label>
     <div class="actions">${isNew ? '' : '<button type="button" class="danger" id="odo-del">Șterge</button>'}<button class="primary">Salvează</button></div>
@@ -1672,6 +1766,115 @@ function openOdometer(o, { runOcr = false } = {}) {
   });
 }
 
+// ---------- fișa tehnică, istoricul pentru vânzare, drumuri ----------
+const fmtN = (n, d = 0) => (n == null || n === '' ? '' : num(n, d));
+function sheetRows(rows) {
+  const r = rows.filter(([, val]) => val !== '' && val != null);
+  return r.length ? `<table>${r.map(([k, val]) => `<tr><td>${esc(k)}</td><td class="n">${esc(val)}</td></tr>`).join('')}</table>` : '';
+}
+
+// Fișa tehnică: se face din datele salvate, doar când ai nevoie (tipărire sau „Salvează ca PDF”)
+function printVehicleSheet(v) {
+  if (!v) return;
+  const t = typeOf(v.type);
+  const s = vehicleStats(v.id);
+  const u = t.meter === 'h' ? 'ore' : 'km';
+  const rems = state.reminders.filter((r) => r.vehicleId === v.id && !r.done).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const docs = (v.docs || []).map((d) => `<figure><img src="${blobURL(d.image)}" alt=""><figcaption>${d.kind === 'tyre' ? 'Eticheta anvelope / presiuni' : d.kind === 'oil' ? 'Eticheta ulei / service' : 'Document'}</figcaption></figure>`).join('');
+  printPage(`Fișă tehnică · ${v.name}`, `${t.icon} ${t.name}`, `<article class="p-receipt">
+    <h2>Identificare</h2>${sheetRows([['Număr înmatriculare', v.plate], ['Marca', v.make], ['Model', v.model], ['An fabricație', v.year || ''], ['Prima înmatriculare', v.firstReg ? fmtDate(v.firstReg) : ''], ['Categorie', v.category], ['VIN', v.vin]])}
+    <h2>Motor</h2>${sheetRows([['Combustibil', v.fuelType], ['Cilindree', v.engineCc ? `${v.engineCc} cm³` : ''], ['Putere', v.powerKw ? `${fmtN(v.powerKw, 1)} kW (${Math.round(v.powerKw * 1.36)} CP)` : ''], ['Baterie', v.batteryKwh ? `${fmtN(v.batteryKwh, 1)} kWh` : '']])}
+    <h2>Roți și anvelope</h2>${sheetRows([['Anvelope', v.tyreSize], ['Anvelope iarnă', v.tyreSizeWinter], ['Presiune față', v.pressureFront ? `${fmtN(v.pressureFront, 1)} bar` : ''], ['Presiune spate', v.pressureRear ? `${fmtN(v.pressureRear, 1)} bar` : ''], ['Strângere roți', v.wheelTorque]])}
+    <h2>Întreținere</h2>${sheetRows([['Ulei motor', v.oilType], ['Cantitate ulei', v.oilLiters ? `${fmtN(v.oilLiters, 1)} L` : ''], ['Revizie la', `${fmtN(v.serviceKm || SERVICE_DEFAULTS[v.type || 'car'])} ${u}${v.serviceMonths ? ` sau ${v.serviceMonths} luni` : ''}`], ['La bord acum', s.lastKm != null ? `${fmtN(s.lastKm)} ${u}` : ''], ['Consum mediu', s.consumption ? `${fmtN(s.consumption, 1)} L/100 km` : s.kwh100 ? `${fmtN(s.kwh100, 1)} kWh/100 km` : '']])}
+    ${v.notes ? `<p><i>${esc(v.notes)}</i></p>` : ''}
+    ${rems.length ? `<h2>Expirări</h2>${sheetRows(rems.map((r) => [r.title || r.type, `${fmtDate(r.dueDate)}${r.dueKm ? ` / ${fmtN(r.dueKm)} ${u}` : ''}`]))}` : ''}
+    <div class="p-photos">${docs}</div>
+  </article>`);
+}
+
+// Istoricul pentru vânzare: km în timp, service și reparații, fără datele proprietarului
+function openSaleHistory(v) {
+  if (!v) return;
+  openModal('📜 Istoric pentru vânzare', `
+  <form id="hist-form" class="form">
+    <p class="small">Un document pentru cumpărător: evoluția kilometrajului, reviziile și reparațiile, cu dovezi. Nu conține numele tău, adresa sau notițele personale.</p>
+    <label class="check"><input type="checkbox" name="amounts" checked> Cu sumele plătite</label>
+    <label class="check"><input type="checkbox" name="photos"> Cu pozele bonurilor de service</label>
+    <label class="check"><input type="checkbox" name="plate" checked> Cu numărul de înmatriculare</label>
+    <label class="check"><input type="checkbox" name="fuel"> Cu lista alimentărilor</label>
+    <div class="actions"><button class="primary">📄 Fă documentul (PDF / tipărire)</button></div>
+  </form>`, (root) => {
+    const form = $('#hist-form', root);
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const opt = { amounts: form.amounts.checked, photos: form.photos.checked, plate: form.plate.checked, fuel: form.fuel.checked };
+      closeModal();
+      printSaleHistory(v, opt);
+    });
+  });
+}
+
+function printSaleHistory(v, opt) {
+  const t = typeOf(v.type);
+  const u = t.meter === 'h' ? 'ore' : 'km';
+  const s = vehicleStats(v.id);
+  // un punct pe lună (cel mai mare km citit în luna respectivă)
+  const byMonth = new Map();
+  for (const r of s.readings) { const m = r.date.slice(0, 7); if (!byMonth.has(m) || byMonth.get(m).km < r.km) byMonth.set(m, r); }
+  const timeline = [...byMonth.values()].sort((a, b) => a.date.localeCompare(b.date));
+  const kmAt = (date) => { let k = null; for (const r of s.readings) if (r.date <= date) k = r.km; return k; };
+  const service = vehicleExpenses(v.id).filter((e) => !isFuelExpense(e, state)).sort((a, b) => a.date.localeCompare(b.date));
+  const total = service.reduce((a, e) => a + (+e.total || 0), 0);
+  const fuelRows = opt.fuel ? s.fuel.map((e) => [fmtDate(e.date), `${e.fuel?.liters ? fmtN(e.fuel.liters, 2) + ' L' : e.fuel?.kwh ? fmtN(e.fuel.kwh, 1) + ' kWh' : ''}${e.fuel?.km ? ` · ${fmtN(e.fuel.km)} ${u}` : ''}${opt.amounts ? ` · ${money(e.total)}` : ''}`]) : [];
+  const desc = [v.make, v.model, v.year].filter(Boolean).join(' ') || v.name;
+  printPage(`Istoric vehicul · ${desc}`, `${opt.plate && v.plate ? v.plate + ' · ' : ''}${v.vin ? 'VIN ' + v.vin : ''}`, `<article class="p-receipt">
+    <h2>Kilometraj în timp</h2>
+    ${timeline.length ? `<table>${timeline.map((r) => `<tr><td>${esc(fmtDate(r.date))}</td><td class="n">${esc(fmtN(r.km))} ${u}</td></tr>`).join('')}</table>` : '<p>Nicio citire salvată.</p>'}
+    ${s.consumption || s.kwh100 ? `<p>Consum mediu: <b>${esc(s.consumption ? fmtN(s.consumption, 1) + ' L/100 km' : fmtN(s.kwh100, 1) + ' kWh/100 km')}</b></p>` : ''}
+    <h2>Revizii, reparații și piese (${service.length})</h2>
+    ${service.length ? `<table>${service.map((e) => `<tr><td>${esc(fmtDate(e.date))}${kmAt(e.date) != null ? `<br><small>${esc(fmtN(kmAt(e.date)))} ${u}</small>` : ''}</td>
+      <td><b>${esc(e.store || '')}</b>${catById(e.categoryId) ? ` · ${esc(catLabel(catById(e.categoryId)))}` : ''}${(e.items || []).length ? `<br><small>${esc(e.items.map((i) => i.name).slice(0, 12).join(', '))}</small>` : ''}</td>
+      ${opt.amounts ? `<td class="n">${esc(money(e.total))}</td>` : ''}</tr>`).join('')}</table>
+      ${opt.amounts ? `<p>Total întreținere: <b>${esc(money(total))}</b></p>` : ''}` : '<p>Nicio cheltuială de service salvată.</p>'}
+    ${fuelRows.length ? `<h2>Alimentări (${fuelRows.length})</h2>${sheetRows(fuelRows)}` : ''}
+    ${opt.photos ? `<div class="p-photos">${service.flatMap((e) => [e.image, ...(e.extraImages || [])].filter(Boolean)).map((b) => `<img src="${blobURL(b)}" alt="">`).join('')}</div>` : ''}
+    <p><small>Document generat din bonurile și citirile de kilometraj salvate în aplicație. Nu conține date personale ale proprietarului.</small></p>
+  </article>`);
+}
+
+// Import Google Timeline: fișierul e citit doar pe telefon; se păstrează km cu mașina pe fiecare zi
+function importTimeline(v) {
+  if (!v) return;
+  openModal('🗺️ Drumuri din Google Timeline', `
+  <div class="form">
+    <p class="small">Pe telefon: <b>Setări → Locație → Cronologie → Exportă datele cronologiei</b> (sau din Google Takeout, „Istoricul locațiilor”). Alege aici fișierul <code>.json</code>.</p>
+    <p class="small">Fișierul e citit doar pe telefon, nu se trimite nicăieri. Din el păstrăm <b>doar kilometrii parcurși cu mașina în fiecare zi</b> – fără locuri, adrese sau trasee.</p>
+    <input type="file" id="tl-file" accept="application/json,.json">
+    <div id="tl-status" class="ocr hidden"></div>
+  </div>`, (root) => {
+    $('#tl-file', root).addEventListener('change', async (ev) => {
+      const file = ev.target.files[0];
+      const st = $('#tl-status', root);
+      st.classList.remove('hidden');
+      if (!file) return;
+      if (file.size > 300e6) { st.textContent = '⚠️ Fișier prea mare.'; return; }
+      st.textContent = '🔍 Citesc…';
+      try {
+        const days = parseTimeline(JSON.parse(await file.text()));
+        const n = Object.keys(days).length;
+        if (!n) { st.textContent = 'ℹ️ Nu am găsit drumuri cu mașina în fișier.'; return; }
+        const trips = sanitizeTrips({ ...state.trips, [v.id]: { ...(state.trips[v.id] || {}), ...days } });
+        await db.put('meta', { id: 'trips', data: trips });
+        state.trips = trips;
+        const km = Object.values(days).reduce((a, x) => a + x, 0);
+        closeModal();
+        render();
+        toast(`🗺️ ${n} zile cu drumuri, ${num(km, 0)} km importați`);
+      } catch { st.textContent = '⚠️ Fișierul nu pare un export Timeline (.json).'; }
+    });
+  });
+}
+
 async function needVehicle() {
   if (state.vehicles.length) return true;
   toast('Adaugă întâi o mașină');
@@ -1689,7 +1892,8 @@ function openReminder(r) {
       <label>Expiră la<input name="dueDate" type="date" value="${esc(r.dueDate)}" required></label>
     </div>
     <label>Denumire (opțional)<input name="title" value="${esc(r.title || '')}" placeholder="ex.: RCA Allianz"></label>
-    <label>Mașina<select name="vehicleId">${options(state.vehicles, r.vehicleId, '— general —')}</select></label>
+    <label>Vehiculul<select name="vehicleId">${options(state.vehicles, r.vehicleId, '— general —')}</select></label>
+    <label id="km-box" class="${r.type === 'Revizie' || r.dueKm ? '' : 'hidden'}">Sau la kilometrajul / orele<input name="dueKm" inputmode="numeric" value="${esc(r.dueKm ?? '')}" placeholder="ex.: 135000"></label>
     <label>Anunță-mă cu câte zile înainte<input name="notifyDays" value="${esc((r.notifyDays || [30, 7, 1]).join(', '))}"></label>
     <label>Notițe (poliță, asigurator, cost)<textarea name="notes" rows="2">${esc(r.notes || '')}</textarea></label>
     <div class="actions">
@@ -1706,14 +1910,28 @@ function openReminder(r) {
       vehicleId: form.vehicleId.value,
       notifyDays: form.notifyDays.value.split(/[,; ]+/).map(Number).filter((n) => Number.isFinite(n) && n >= 0),
       notes: form.notes.value.trim(),
-      notified: r.dueDate === form.dueDate.value ? (r.notified || []) : [],
+      dueKm: toNum(form.dueKm.value),
+      notified: r.dueDate === form.dueDate.value && r.dueKm === toNum(form.dueKm.value) ? (r.notified || []) : [],
     });
+    form.type.addEventListener('change', () => $('#km-box', root).classList.toggle('hidden', form.type.value !== 'Revizie' && !form.dueKm.value));
     $('#rem-del', root)?.addEventListener('click', async () => { if (await remove('reminders', r.id, 'expirarea')) closeModal(); });
     $('#rem-ics', root)?.addEventListener('click', () => downloadICS([read()], 'expirare.ics'));
     $('#rem-renew', root)?.addEventListener('click', () => {
-      const [y, m, d] = form.dueDate.value.split('-').map(Number);
+      const v = vehById(form.vehicleId.value);
+      if (form.type.value === 'Anvelope') {
+        const n = renewTyre({ dueDate: form.dueDate.value, title: form.title.value });
+        form.dueDate.value = n.dueDate; form.title.value = n.title;
+        return toast(`Următorul schimb: ${n.title.toLowerCase()} (${fmtDate(n.dueDate)}). Salvează.`);
+      }
+      if (form.type.value === 'Revizie') {
+        // revizia făcută azi: următoarea peste un an sau peste intervalul de km
+        const km = v ? vehicleStats(v.id).lastKm : null;
+        form.dueDate.value = addYears(todayISO(), 1);
+        if (km != null) form.dueKm.value = km + (v.serviceKm || SERVICE_DEFAULTS[v.type || 'car']);
+        return toast('Următoarea revizie calculată de azi. Verifică și salvează.');
+      }
       const years = form.type.value === 'ITP' ? 2 : 1;
-      form.dueDate.value = `${y + years}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      form.dueDate.value = addYears(form.dueDate.value, years);
       toast(`Data mutată cu ${years} an${years > 1 ? 'i' : ''}. Verifică și salvează.`);
     });
     form.addEventListener('submit', async (ev) => {
@@ -1754,7 +1972,8 @@ async function notify(n) {
 
 async function checkReminders() {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const due = RC.dueNotifications(state.reminders, new Date());
+  const kmNow = Object.fromEntries(state.vehicles.map((v) => [v.id, vehicleStats(v.id).lastKm]).filter(([, k]) => k != null));
+  const due = RC.dueNotifications(state.reminders, new Date(), kmNow);
   for (const n of due) {
     try { await notify(n); } catch { /* ignoră */ }
     const r = state.reminders.find((x) => x.id === n.id);
@@ -1888,26 +2107,142 @@ function openProject(p) {
 
 function openVehicle(v) {
   const isNew = !state.vehicles.some((x) => x.id === v.id);
-  openModal(isNew ? 'Mașină nouă' : 'Editează mașina', `
+  v.docs = v.docs || [];
+  const t = typeOf(v.type);
+  const docImg = (kind) => v.docs.find((d) => d.kind === kind)?.image;
+  const f = (name, label, attrs = '') => `<label>${label}<input name="${name}" value="${esc(v[name] ?? '')}" ${attrs}></label>`;
+  openModal(isNew ? 'Vehicul nou' : 'Editează vehiculul', `
   <form id="veh-form" class="form">
-    <label>Nume<input name="name" value="${esc(v.name)}" required placeholder="ex.: Dacia Logan"></label>
-    <label>Număr înmatriculare<input name="plate" value="${esc(v.plate || '')}" placeholder="B 123 ABC"></label>
-    <label>Carburant<input name="fuelType" list="fuel-types2" value="${esc(v.fuelType || '')}"></label>
-    <datalist id="fuel-types2"><option>benzină</option><option>motorină</option><option>GPL</option><option>hibrid</option><option>electric</option></datalist>
-    <label>VIN / serie șasiu (opțional)<input name="vin" value="${esc(v.vin || '')}"></label>
+    <label>Tip<select name="type">${VEHICLE_TYPES.map((x) => `<option value="${x.key}" ${x.key === (v.type || 'car') ? 'selected' : ''}>${x.icon} ${esc(x.name)}</option>`).join('')}</select></label>
+    ${f('name', 'Nume', 'required placeholder="ex.: Dacia Logan"')}
+    <div class="ocr-box">
+      <button type="button" id="veh-ocr">📷 Citește din talon / cartea de identitate (CIV)</button>
+      <p class="muted small">Se citesc doar datele mașinii (număr, marcă, model, VIN, motor). Numele și adresa proprietarului nu se citesc, iar poza talonului nu se păstrează.</p>
+      <div id="veh-ocr-status" class="ocr hidden"></div>
+    </div>
+    <fieldset><legend>Identificare</legend>
+      <div class="grid2">${f('plate', 'Număr înmatriculare', 'placeholder="B 123 ABC"')}${f('firstReg', 'Prima înmatriculare', 'type="date"')}</div>
+      <div class="grid2">${f('make', 'Marca')}${f('model', 'Model')}</div>
+      <div class="grid2">${f('year', 'An fabricație', 'inputmode="numeric"')}${f('category', 'Categorie (J)', 'placeholder="M1"')}</div>
+      <label>VIN / serie șasiu<input name="vin" value="${esc(v.vin || '')}" maxlength="17" autocapitalize="characters"></label>
+      <div class="row-flex wrap"><button type="button" id="vin-decode" class="link">🌐 Completează după VIN (bază de date gratuită NHTSA)</button></div>
+    </fieldset>
+    <fieldset><legend>Motor</legend>
+      <div class="grid3">
+        <label class="v-fuel">Combustibil<input name="fuelType" list="fuel-types2" value="${esc(v.fuelType || '')}"></label>
+        ${f('engineCc', 'Cilindree (cm³)', 'inputmode="numeric"')}${f('powerKw', 'Putere (kW)', 'inputmode="decimal"')}
+      </div>
+      <label class="v-bat">Baterie (kWh)<input name="batteryKwh" inputmode="decimal" value="${esc(v.batteryKwh ?? '')}"></label>
+      <datalist id="fuel-types2"><option>benzină</option><option>motorină</option><option>GPL</option><option>hibrid</option><option>electric</option></datalist>
+    </fieldset>
+    <fieldset><legend>Roți și anvelope</legend>
+      <div class="grid2">${f('tyreSize', 'Anvelope (vară / toate)', 'placeholder="205/55 R16"')}${f('tyreSizeWinter', 'Anvelope iarnă', 'placeholder="195/65 R15"')}</div>
+      <div class="grid3">${f('pressureFront', 'Presiune față (bar)', 'inputmode="decimal"')}${f('pressureRear', 'Presiune spate (bar)', 'inputmode="decimal"')}${f('wheelTorque', 'Strângere roți', 'placeholder="110 Nm"')}</div>
+      <div class="doc-row">${docImg('tyre') ? `<img class="thumb" src="${blobURL(docImg('tyre'))}" alt="eticheta anvelope">` : ''}<button type="button" data-doc="tyre">📷 Eticheta de pe ușa șoferului</button></div>
+    </fieldset>
+    <fieldset><legend>Întreținere</legend>
+      <div class="grid2">${f('oilType', 'Ulei motor', 'placeholder="5W-30 C3"')}${f('oilLiters', 'Cantitate ulei (L)', 'inputmode="decimal"')}</div>
+      <div class="grid2">
+        <label><span class="svc-label">Revizie la fiecare (km)</span><input name="serviceKm" inputmode="numeric" value="${esc(v.serviceKm ?? '')}" placeholder="${esc(SERVICE_DEFAULTS[v.type || 'car'])}"></label>
+        ${f('serviceMonths', 'sau la fiecare (luni)', 'inputmode="numeric" placeholder="12"')}
+      </div>
+      <div class="doc-row">${docImg('oil') ? `<img class="thumb" src="${blobURL(docImg('oil'))}" alt="eticheta ulei">` : ''}<button type="button" data-doc="oil">📷 Eticheta de ulei / service</button></div>
+      <label>Notițe tehnice<textarea name="notes" rows="2">${esc(v.notes || '')}</textarea></label>
+    </fieldset>
     <div class="actions">${isNew ? '' : '<button type="button" class="danger" id="veh-del">Șterge</button>'}<button class="primary">Salvează</button></div>
   </form>`, (root) => {
     const form = $('#veh-form', root);
-    $('#veh-del', root)?.addEventListener('click', async () => { if (await remove('vehicles', v.id, 'mașina')) closeModal(); });
+    const st = $('#veh-ocr-status', root);
+    const syncType = () => {
+      const tt = typeOf(form.type.value);
+      root.querySelectorAll('.v-bat').forEach((el) => el.classList.toggle('hidden', tt.energy === 'fuel'));
+      $('.svc-label', root).textContent = tt.meter === 'h' ? 'Revizie la fiecare (ore)' : 'Revizie la fiecare (km)';
+      form.serviceKm.placeholder = String(SERVICE_DEFAULTS[tt.key]);
+    };
+    form.type.addEventListener('change', syncType);
+    syncType();
+    const fill = (data, label) => {
+      const got = [];
+      for (const [k, val] of Object.entries(data)) {
+        const el = form[k];
+        if (!el || val == null || val === '' || el.value) continue;
+        el.value = val;
+        got.push(k);
+      }
+      if (data.fuelType === 'electric' && form.type.value === 'car') form.type.value = 'electric';
+      if (data.fuelType === 'hibrid' && form.type.value === 'car') form.type.value = 'hybrid';
+      syncType();
+      st.classList.remove('hidden');
+      st.textContent = got.length ? `✅ ${label}: am completat ${got.length} câmpuri. Verifică-le.` : `ℹ️ ${label}: nimic nou de completat (câmpurile goale se completează, cele scrise rămân).`;
+    };
+    $('#veh-ocr', root).addEventListener('click', async () => {
+      const file = await pickFile();
+      if (!file) return;
+      st.classList.remove('hidden');
+      st.textContent = '🔍 Citesc talonul…';
+      try {
+        const text = await recognize(file, { onProgress: () => {} });
+        const data = parseRegistration(text);
+        if (!v.name && !form.name.value && (data.make || data.model)) form.name.value = [data.make, data.model].filter(Boolean).join(' ');
+        fill(data, 'Talon');
+      } catch (e) { st.textContent = '⚠️ ' + (e.message || 'Nu am putut citi poza'); }
+    });
+    $('#vin-decode', root).addEventListener('click', async () => {
+      const vin = cleanVin(form.vin.value);
+      if (!vin) return toast('Scrie întâi VIN-ul (17 caractere)');
+      form.vin.value = vin;
+      st.classList.remove('hidden');
+      st.textContent = '🌐 Caut VIN-ul…';
+      try {
+        const data = await decodeVin(vin);
+        if (!data) { st.textContent = 'ℹ️ Baza de date nu are informații pentru acest VIN (e mai completă pentru mașini vândute în SUA).'; return; }
+        fill(data, 'VIN');
+      } catch { st.textContent = '⚠️ Nu am putut accesa baza de date VIN. Completează manual.'; }
+    });
+    root.querySelectorAll('[data-doc]').forEach((b) => b.addEventListener('click', async () => {
+      const kind = b.dataset.doc;
+      const file = await pickFile();
+      if (!file) return;
+      const img = await compressImage(file, 1600);
+      if (!img) return;
+      Object.assign(v, readVeh(form, v));
+      v.docs = [...v.docs.filter((d) => d.kind !== kind), { kind, image: img }];
+      if (kind === 'tyre' || kind === 'oil') {
+        // încercăm să citim și valorile de pe etichetă
+        recognize(file).then((text) => {
+          if (!form.isConnected) return;
+          if (kind === 'tyre') fill(parseTyreSticker(text), 'Eticheta anvelope');
+          else { const m = text.toUpperCase().match(/\b(\d{1,2}W[- ]?\d{2})\b/); if (m) fill({ oilType: m[1].replace(' ', '-') }, 'Eticheta ulei'); }
+        }).catch(() => {});
+      }
+      openVehicle(v);
+    }));
+    $('#veh-del', root)?.addEventListener('click', async () => { if (await remove('vehicles', v.id, 'vehiculul')) closeModal(); });
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       state.vehicleId = v.id;
-      if (!(await save('vehicles', { ...v, name: form.name.value.trim(), plate: form.plate.value.trim().toUpperCase(), fuelType: form.fuelType.value.trim(), vin: form.vin.value.trim() }))) return;
+      const data = readVeh(form, v);
+      if (data.vin && !validVin(data.vin)) { toast('VIN-ul are 17 caractere, fără I, O, Q'); form.vin.focus(); return; }
+      if (!(await save('vehicles', data))) return;
       // fiecare vehicul are proiectul lui (cu iconița pe ecranul principal)
-      if (!vehicleProject(v.id)) await save('projects', { id: db.uid(), name: form.name.value.trim(), kind: 'vehicle', icon: '🚗', vehicleId: v.id, order: state.projects.length });
+      const vp = vehicleProject(v.id);
+      if (!vp) await save('projects', { id: db.uid(), name: data.name, kind: 'vehicle', icon: typeOf(data.type).icon, vehicleId: v.id, order: state.projects.length });
+      else if (VEHICLE_TYPES.some((x) => x.icon === vp.icon) && vp.icon !== typeOf(data.type).icon) await save('projects', { ...vp, icon: typeOf(data.type).icon });
       closeModal();
     });
   });
+}
+
+function readVeh(form, v) {
+  const n = (k) => toNum(form[k].value);
+  return {
+    ...v, type: form.type.value, name: form.name.value.trim(), plate: form.plate.value.trim().toUpperCase(), firstReg: form.firstReg.value,
+    make: form.make.value.trim(), model: form.model.value.trim(), year: n('year'), category: form.category.value.trim().toUpperCase(),
+    vin: form.vin.value.trim().toUpperCase().replace(/\s/g, ''), fuelType: form.fuelType.value.trim(), engineCc: n('engineCc'), powerKw: n('powerKw'),
+    batteryKwh: n('batteryKwh'), tyreSize: form.tyreSize.value.trim(), tyreSizeWinter: form.tyreSizeWinter.value.trim(),
+    pressureFront: n('pressureFront'), pressureRear: n('pressureRear'), wheelTorque: form.wheelTorque.value.trim(),
+    oilType: form.oilType.value.trim(), oilLiters: n('oilLiters'), serviceKm: n('serviceKm'), serviceMonths: n('serviceMonths'), notes: form.notes.value.trim(),
+  };
 }
 
 // ---------- export / import ----------
@@ -1996,7 +2331,7 @@ async function exportJSON() {
     }));
   }
   // ce a învățat aplicația din corecturi (nume produse, subcategorii, magazine, firme verificate)
-  out.learned = { itemRules: state.itemRules, itemNames: state.itemNames, storeRules: state.storeRules, cuiCache: state.cuiCache, storeProjects: state.storeProjects, pantry: state.pantry };
+  out.learned = { itemRules: state.itemRules, itemNames: state.itemNames, storeRules: state.storeRules, cuiCache: state.cuiCache, storeProjects: state.storeProjects, pantry: state.pantry, trips: state.trips };
   let json = JSON.stringify(out);
   if (pw) json = JSON.stringify(await encryptText(json, pw));
   download(new Blob([json], { type: 'application/json' }), `fiscan-backup-${todayISO()}${pw ? '-criptat' : ''}.json`);
@@ -2045,6 +2380,7 @@ async function importJSON() {
       await db.put('meta', { id: 'cuiCache', data: sanitizeCuiCache({ ...sanitizeCuiCache(L.cuiCache), ...state.cuiCache }) });
       await db.put('meta', { id: 'storeProjects', data: sanitizeStoreProjects({ ...sanitizeStoreProjects(L.storeProjects), ...state.storeProjects }) });
       await db.put('meta', { id: 'pantry', data: sanitizePantry({ ...sanitizePantry(L.pantry), ...state.pantry }) });
+      await db.put('meta', { id: 'trips', data: sanitizeTrips({ ...sanitizeTrips(L.trips), ...state.trips }) });
       await loadAll();
       render();
       backfillThumbs().catch(() => {});
@@ -2091,8 +2427,26 @@ const actions = {
   'new-fuel': async () => {
     if (!(await needVehicle())) return;
     const fuelCat = state.categories.find((c) => c.isFuel);
-    openExpense(newExpense({ categoryId: fuelCat?.id || '', vehicleId: state.vehicleId, projectId: '', fuel: { liters: null } }));
+    openExpense(newExpense({ categoryId: fuelCat?.id || '', vehicleId: state.vehicleId, projectId: vehicleProject(state.vehicleId)?.id || '', fuel: { liters: null } }));
   },
+  'new-charge': async () => {
+    if (!(await needVehicle())) return;
+    const fuelCat = state.categories.find((c) => c.isFuel);
+    openExpense(newExpense({ categoryId: fuelCat?.id || '', vehicleId: state.vehicleId, projectId: vehicleProject(state.vehicleId)?.id || '', energyMode: 'electric', fuel: { kwh: null, place: 'public' } }));
+  },
+  'std-reminders': async () => {
+    const v = vehById(state.vehicleId);
+    if (!v) return;
+    const list = standardReminders(v, state.reminders, { lastKm: vehicleStats(v.id).lastKm, uid: db.uid });
+    if (!list.length) return toast('Ai deja toate expirările obișnuite pentru acest vehicul');
+    for (const r of list) { const c = sanitize('reminders', r); if (c) await db.put('reminders', c); }
+    await loadAll();
+    render();
+    toast(`➕ ${list.length} expirări adăugate (${list.map((r) => r.title).join(', ')}). Deschide-le și pune datele exacte.`);
+  },
+  'veh-sheet': () => printVehicleSheet(vehById(state.vehicleId)),
+  'veh-history': () => openSaleHistory(vehById(state.vehicleId)),
+  'veh-timeline': () => importTimeline(vehById(state.vehicleId)),
   'photo-odometer': async () => {
     if (!(await needVehicle())) return;
     const f = await pickFile();

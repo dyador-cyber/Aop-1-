@@ -45,13 +45,24 @@ const SCHEMAS = {
     fuel: o.fuel && typeof o.fuel === 'object' ? {
       liters: numOrNull(o.fuel.liters, 0, 1e5), pricePerLiter: numOrNull(o.fuel.pricePerLiter, 0, 1e4),
       km: numOrNull(o.fuel.km, 0, 1e8), fuelType: str(o.fuel.fuelType, 30),
+      kwh: numOrNull(o.fuel.kwh, 0, 1e5), pricePerKwh: numOrNull(o.fuel.pricePerKwh, 0, 100),
+      place: ['home', 'public'].includes(o.fuel.place) ? o.fuel.place : '', trip: str(o.fuel.trip, 200),
     } : null,
     createdAt: time(o.createdAt), updatedAt: time(o.updatedAt),
   }),
   odometer: (o) => ({ id: id(o.id), vehicleId: id(o.vehicleId), date: date(o.date), km: numOrNull(o.km, 0, 1e8), notes: str(o.notes, 500), image: image(o.image) }),
-  vehicles: (o) => ({ id: id(o.id), name: str(o.name, 80), plate: str(o.plate, 20), fuelType: str(o.fuelType, 30), vin: str(o.vin, 40) }),
+  vehicles: (o) => ({
+    id: id(o.id), name: str(o.name, 80), plate: str(o.plate, 20), fuelType: str(o.fuelType, 30), vin: str(o.vin, 40),
+    type: ['car', 'electric', 'hybrid', 'moto', 'machine'].includes(o.type) ? o.type : 'car',
+    make: str(o.make, 40), model: str(o.model, 40), year: numOrNull(o.year, 1900, 2100), firstReg: date(o.firstReg), category: str(o.category, 5),
+    engineCc: numOrNull(o.engineCc, 0, 20000), powerKw: numOrNull(o.powerKw, 0, 2000), batteryKwh: numOrNull(o.batteryKwh, 0, 500),
+    tyreSize: str(o.tyreSize, 30), tyreSizeWinter: str(o.tyreSizeWinter, 30), pressureFront: numOrNull(o.pressureFront, 0, 10), pressureRear: numOrNull(o.pressureRear, 0, 10),
+    oilType: str(o.oilType, 40), oilLiters: numOrNull(o.oilLiters, 0, 100), serviceKm: numOrNull(o.serviceKm, 0, 1e6), serviceMonths: numOrNull(o.serviceMonths, 0, 120),
+    wheelTorque: str(o.wheelTorque, 30), notes: str(o.notes, 2000),
+    docs: (Array.isArray(o.docs) ? o.docs : []).slice(0, 6).map((d) => ({ kind: ['tyre', 'oil', 'other'].includes(d?.kind) ? d.kind : 'other', image: image(d?.image) })).filter((d) => d.image),
+  }),
   reminders: (o) => ({
-    id: id(o.id), type: str(o.type, 40), title: str(o.title, 120), dueDate: date(o.dueDate), vehicleId: id(o.vehicleId),
+    id: id(o.id), type: str(o.type, 40), title: str(o.title, 120), dueDate: date(o.dueDate), vehicleId: id(o.vehicleId), dueKm: numOrNull(o.dueKm, 0, 1e8),
     notifyDays: (Array.isArray(o.notifyDays) ? o.notifyDays : []).map((n) => numOrNull(n, 0, 3650)).filter((n) => n !== null).map(Math.round).slice(0, 10),
     notes: str(o.notes, 2000),
     notified: (Array.isArray(o.notified) ? o.notified : []).map((k) => str(k, 40)).filter(Boolean).slice(-100),
@@ -143,6 +154,19 @@ export function sanitizeItemNames(obj) {
   if (!obj || typeof obj !== 'object') return out;
   for (const [k, v] of Object.entries(obj).slice(0, 5000)) {
     if (typeof k === 'string' && k.length <= 60 && /^[a-z0-9 ]+$/.test(k) && typeof v === 'string' && v.trim()) out[k] = str(v, 100).trim();
+  }
+  return out;
+}
+
+// Drumuri din Google Timeline: { idVehicul: { „2026-09-01”: km } } – doar km pe zi, fără locuri.
+export function sanitizeTrips(obj) {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const [vid, days] of Object.entries(obj).slice(0, 50)) {
+    if (!id(vid) || !days || typeof days !== 'object') continue;
+    const d = {};
+    for (const [k, v] of Object.entries(days).slice(-2000)) { const n = numOrNull(v, 0, 5000); if (DATE_RE.test(k) && n != null) d[k] = n; }
+    out[vid] = d;
   }
   return out;
 }

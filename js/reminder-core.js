@@ -11,11 +11,23 @@
 
   // Returnează notificările care trebuie afișate acum. Fiecare are o cheie unică
   // (dată + prag) salvată în reminder.notified ca să nu se repete.
-  function dueNotifications(reminders, today) {
+  // kmNow = { idVehicul: km (sau ore) la bord } pentru reviziile la kilometraj.
+  function dueNotifications(reminders, today, kmNow) {
     today = today || new Date();
     const out = [];
     for (const r of reminders || []) {
       if (!r.dueDate || r.done) continue;
+      // revizia vine la km (cu 500 km / 25 ore înainte) sau la dată, care e primul
+      const km = kmNow && r.dueKm && r.vehicleId ? kmNow[r.vehicleId] : null;
+      if (km != null && km >= r.dueKm - (r.dueKm < 20000 ? 25 : 500)) {
+        const kmKey = `${r.dueKm}km`;
+        if (!(r.notified || []).includes(kmKey)) {
+          const left = r.dueKm - km;
+          const what = r.title || r.type || 'Revizie';
+          out.push({ id: r.id, key: kmKey, days: 0, title: '🔧 ' + what, body: left > 0 ? `${what}: mai sunt ${left} până la ${r.dueKm}.` : `${what}: ai depășit ${r.dueKm} cu ${-left}.` });
+          continue;
+        }
+      }
       const days = daysUntil(r.dueDate, today);
       const thresholds = (r.notifyDays && r.notifyDays.length ? r.notifyDays : [30, 7, 1]).slice().sort((a, b) => a - b);
       let key = null;

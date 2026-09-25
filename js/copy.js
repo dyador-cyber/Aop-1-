@@ -43,14 +43,18 @@ function receiptHTML(e, { photos = true, urlOf }) {
   </article>`;
 }
 
-// Pagina de tipărit: se pune peste aplicație doar cât timp e deschisă fereastra de tipărire.
 export function printReceipts(list, { title = 'Bonuri', photos = true, urlOf } = {}) {
+  const total = list.reduce((s, e) => s + (+e.total || 0), 0);
+  printPage(title, `${list.length} ${list.length === 1 ? 'bon' : 'bonuri'} · total ${money(total)}`, list.map((e) => receiptHTML(e, { photos, urlOf })).join(''));
+}
+
+// Pagina de tipărit: se pune peste aplicație doar cât timp e deschisă fereastra de tipărire.
+// bodyHTML trebuie să fie deja escapat de cel care îl construiește.
+export function printPage(title, subtitle, bodyHTML) {
   document.getElementById('print-area')?.remove();
   const area = document.createElement('div');
   area.id = 'print-area';
-  const total = list.reduce((s, e) => s + (+e.total || 0), 0);
-  area.innerHTML = `<header class="p-head"><h1>${esc(title)}</h1><p>${list.length} ${list.length === 1 ? 'bon' : 'bonuri'} · total ${money(total)} · generat ${esc(new Date().toLocaleDateString('ro-RO'))} cu Fiscan</p></header>
-    ${list.map((e) => receiptHTML(e, { photos, urlOf })).join('')}`;
+  area.innerHTML = `<header class="p-head"><h1>${esc(title)}</h1><p>${esc(subtitle)}${subtitle ? ' · ' : ''}generat ${esc(new Date().toLocaleDateString('ro-RO'))} cu Fiscan</p></header>${bodyHTML}`;
   document.body.appendChild(area);
   document.body.classList.add('printing');
   const done = () => { document.body.classList.remove('printing'); area.remove(); window.removeEventListener('afterprint', done); };
