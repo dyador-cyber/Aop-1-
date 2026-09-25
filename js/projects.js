@@ -11,13 +11,6 @@ export const PROJECT_ICONS = ['🏠', '🏡', '🏘️', '🏗️', '🔧', '�
 export const PROJECT_COLORS = ['#2e7d32', '#1565c0', '#6d4c41', '#ef6c00', '#6a1b9a', '#00838f', '#c62828', '#455a64'];
 export const kindOf = (k) => PROJECT_KINDS.find((x) => x.key === k) || PROJECT_KINDS[PROJECT_KINDS.length - 1];
 
-// Proiectele propuse la prima pornire (numele stabilite împreună).
-export const SUGGESTED_PROJECTS = [
-  { name: 'Casa București', kind: 'house', icon: '🏠' },
-  { name: 'Casa Varlam', kind: 'house', icon: '🏡' },
-  { name: 'Atelier', kind: 'workshop', icon: '🔧' },
-];
-
 export const PERIODS = [
   { key: 'today', name: 'Azi' },
   { key: 'week', name: 'Săptămâna' },

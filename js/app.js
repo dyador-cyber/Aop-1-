@@ -10,7 +10,7 @@ import { sanitize, sanitizeRules, sanitizeInvSubs, sanitizeStoreRules, sanitizeC
 import { SUBCATS, GROUPS, groupOf, subcatByKey, classifyItem, parseItems, itemKey, toolDoubt } from './items.js';
 import { INV_STATUSES, OWNED, statusByKey, syncFromExpense, undoExpense, findSimilar, addMonths, WARRANTY_MONTHS, splitUnits, nextLabel, lendTool, returnTool, RETURN_STATES } from './inventory.js';
 import { encryptText, decryptText } from './crypto.js';
-import { PROJECT_KINDS, PROJECT_ICONS, PROJECT_COLORS, SUGGESTED_PROJECTS, PERIODS, kindOf, periodRange, inRange, expenseShares, projectTotals, projectExpenses, categoryTree, categoryBreakdown, planMigration } from './projects.js';
+import { PROJECT_KINDS, PROJECT_ICONS, PROJECT_COLORS, PERIODS, kindOf, periodRange, inRange, expenseShares, projectTotals, projectExpenses, categoryTree, categoryBreakdown, planMigration } from './projects.js';
 
 const RC = globalThis.ReminderCore;
 
@@ -26,7 +26,7 @@ const DEFAULT_CATEGORIES = [
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
 // Afișată în Setări: arată dacă telefonul a luat ultima actualizare.
-const APP_VERSION = '2026.09.25-8';
+const APP_VERSION = '2026.09.25-9';
 const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie', 'Anvelope', 'Extinctor', 'Trusă prim ajutor', 'Permis / buletin', 'Altul'];
 
@@ -51,7 +51,6 @@ const state = {
   anafStatus: null,
   period: { key: 'month', from: '', to: '' },
   projectId: null, projCat: '',
-  projectsSetup: true,
   invFilter: { q: '', status: 'owned', loc: '' },
 };
 
@@ -127,7 +126,6 @@ async function loadAll() {
   state.storeProjects = sanitizeStoreProjects((await db.get('meta', 'storeProjects'))?.data);
   state.pantry = sanitizePantry((await db.get('meta', 'pantry'))?.data);
   state.trips = sanitizeTrips((await db.get('meta', 'trips'))?.data);
-  state.projectsSetup = !!(await db.get('meta', 'projectsSetup'))?.done;
   const st = await db.get('meta', 'anafStatus');
   state.anafStatus = st && typeof st.at === 'number' ? { ok: st.ok === true, at: st.at } : null;
 }
@@ -332,19 +330,35 @@ function projectTile(p, amount) {
     <span class="tile-sum">${amount ? money(amount) : '—'}</span></button>`;
 }
 
-function renderSetupCard() {
-  if (state.projectsSetup) return '';
-  const have = new Set(state.projects.map((p) => normalize(p.name)));
-  const sugg = SUGGESTED_PROJECTS.filter((x) => !have.has(normalize(x.name)));
-  return `<section class="card setup-card"><h3>📁 Proiectele tale</h3>
-    <p class="small">Fiecare casă, atelierul și fiecare mașină au propriul proiect, cu totalul lor. Bonurile le încarci direct în proiect, apăsând pe iconiță.</p>
-    ${sugg.map((x, i) => `<label class="check"><input type="checkbox" class="setup-pick" data-i="${i}" checked> ${esc(x.icon)} ${esc(x.name)}</label>`).join('')}
-    ${state.projects.length ? `<p class="small muted">Există deja: ${state.projects.map((p) => esc(projIcon(p) + ' ' + p.name)).join(', ')}. Le poți redenumi sau șterge din proiect → ✏️.</p>` : ''}
-    <div class="row-flex wrap"><button class="primary" data-action="setup-projects">Creează proiectele</button><button data-action="skip-setup">Nu acum</button></div>
+// Aplicația goală (prima pornire sau după „Șterge toate datele”): doar primii pași, nimic altceva.
+const appIsEmpty = () => !state.projects.length && !state.expenses.length && !state.vehicles.length && !state.inventory.length;
+function renderWelcome() {
+  return `<section class="card welcome">
+    <h2>👋 Bun venit în Fiscan</h2>
+    <p>Aplicația e goală. Tot ce adaugi rămâne <b>doar pe acest telefon</b>. Cu ce începi?</p>
+    <div class="start-grid">
+      <button data-action="start-project" data-kind="house"><span>🏠</span>Adaugă casa / apartamentul</button>
+      <button data-action="start-project" data-kind="workshop"><span>🔧</span>Atelier / firmă</button>
+      <button data-action="new-vehicle"><span>🚗</span>Adaugă un vehicul</button>
+      <button data-action="new-inv"><span>🧰</span>Adaugă o sculă / un bun</button>
+      <button data-action="photo-receipt"><span>📷</span>Fotografiază primul bon</button>
+      <button data-action="start-project" data-kind="other"><span>📁</span>Alt proiect</button>
+    </div>
+  </section>
+  <section class="card small">
+    <h3>Cum merge</h3>
+    <ol class="steps">
+      <li><b>Proiecte</b>: fiecare casă, atelierul sau mașina are o iconiță cu totalul ei.</li>
+      <li><b>Bonuri</b>: le fotografiezi; aplicația citește magazinul, data, totalul și produsele.</li>
+      <li><b>Întrebi</b>: „cât m-a costat casa luna asta?”, „cât am dat pe motorină?”.</li>
+    </ol>
+    <p class="muted">Sfat: din meniul browserului alege <b>„Adaugă pe ecranul principal”</b>, ca s-o ai ca pe o aplicație.</p>
+    <p class="muted">Ai un backup de pe alt telefon? <button class="link" data-action="import-json">⬆️ Restaurează backup-ul</button></p>
   </section>`;
 }
 
 function renderHome() {
+  if (appIsEmpty()) return renderWelcome();
   const now = todayISO();
   const range = periodRange(state.period);
   const { total, byProject } = projectTotals(state.expenses, range);
@@ -365,7 +379,6 @@ function renderHome() {
     ${none ? projectTile(null, none) : ''}
     <button class="tile add" data-action="new-project"><span class="tile-icon">＋</span><span class="tile-name">Proiect nou</span><span class="tile-sum"></span></button>
   </section>
-  ${renderSetupCard()}
   <section class="quick">
     <button class="big-btn" data-action="photo-receipt">📷<span>Fotografiază bon</span></button>
     <button class="big-btn" data-action="photo-odometer">🚗<span>Poză kilometraj</span></button>
@@ -1020,7 +1033,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       } else if (fix === 'store') goTo(form.store);
       else goTo(form[fix]);
     });
-    // „Împarte bonul”: fiecare produs poate merge la alt proiect (ex. o parte pentru Casa Varlam)
+    // „Împarte bonul”: fiecare produs poate merge la alt proiect (ex. o parte pentru altă casă)
     let split = exp.items.some((i) => i.projectId && i.projectId !== exp.projectId);
     const projSelect = (i) => (split ? `<select class="it-proj" aria-label="Proiectul produsului">${projOptions(i.projectId || '', '↳ ca bonul')}</select>` : '');
     $('#item-split', root)?.addEventListener('click', () => { split = !split; if (!split) exp.items.forEach((i) => { i.projectId = ''; }); renderItems(); });
@@ -2063,7 +2076,7 @@ function openProject(p) {
   openModal(isNew ? 'Proiect nou' : 'Editează proiectul', `
   <form id="proj-form" class="form">
     ${isNew ? '' : `<p>Total cheltuit (toată perioada): <b>${money(total)}</b></p>`}
-    <label>Nume<input name="name" value="${esc(p.name)}" required placeholder="ex.: Casa București"></label>
+    <label>Nume<input name="name" value="${esc(p.name)}" required placeholder="ex.: Casa mea, Apartament Cluj"></label>
     <label>Tip<select name="kind">${PROJECT_KINDS.map((k) => `<option value="${k.key}" ${k.key === kind ? 'selected' : ''}>${k.icon} ${esc(k.name)}</option>`).join('')}</select></label>
     <div class="icon-pick" role="radiogroup" aria-label="Iconiță">${PROJECT_ICONS.map((i) => `<button type="button" class="ip ${i === icon ? 'on' : ''}" data-icon="${i}" aria-label="${i}">${i}</button>`).join('')}</div>
     <div class="color-pick" role="radiogroup" aria-label="Culoare">${PROJECT_COLORS.map((c) => `<button type="button" class="cp ${c === p.color ? 'on' : ''}" data-color="${c}" style="background:${c}" aria-label="culoare"></button>`).join('')}</div>
@@ -2394,6 +2407,9 @@ async function wipe() {
   if (!confirm('Sigur ștergi TOATE datele? Nu se poate anula.')) return;
   if (prompt('Scrie STERGE pentru confirmare') !== 'STERGE') return;
   for (const s of db.STORES) await db.clear(s);
+  // și preferințele mici (perioada aleasă, ultimul proiect): totul de la zero
+  try { localStorage.clear(); } catch { /* ignoră */ }
+  Object.assign(state, { period: { key: 'month', from: '', to: '' }, view: 'home', projectId: null, ask: '', askResult: null, filter: { q: '', cat: '', proj: '', month: '', check: false } });
   await seed();
   await loadAll();
   await migrate().catch(() => {});
@@ -2411,18 +2427,7 @@ const actions = {
   'proj-cat': (el) => { state.projCat = el.dataset.id || ''; state.listLimit = 100; render(); },
   'go-home': () => { state.view = 'home'; render(); window.scrollTo(0, 0); },
   'open-car': (el) => { state.vehicleId = el.dataset.id; state.view = 'car'; render(); window.scrollTo(0, 0); },
-  'setup-projects': async () => {
-    const have = new Set(state.projects.map((p) => normalize(p.name)));
-    const sugg = SUGGESTED_PROJECTS.filter((x) => !have.has(normalize(x.name)));
-    const picked = [...document.querySelectorAll('.setup-pick')].filter((c) => c.checked).map((c) => sugg[+c.dataset.i]).filter(Boolean);
-    let order = state.projects.length;
-    for (const x of picked) { const c = sanitize('projects', { id: db.uid(), ...x, order: order++ }); if (c) await db.put('projects', c); }
-    await db.put('meta', { id: 'projectsSetup', done: true });
-    await loadAll();
-    render();
-    toast(picked.length ? `✔ ${picked.length} proiecte create` : 'Gata');
-  },
-  'skip-setup': async () => { await db.put('meta', { id: 'projectsSetup', done: true }); state.projectsSetup = true; render(); },
+  'start-project': (el) => { const k = el.dataset.kind || 'house'; openProject({ id: db.uid(), name: '', kind: k, icon: kindOf(k).icon }); },
   'edit-expense': (el) => openExpense({ ...state.expenses.find((e) => e.id === el.dataset.id) }),
   'new-fuel': async () => {
     if (!(await needVehicle())) return;
