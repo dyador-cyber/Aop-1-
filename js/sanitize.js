@@ -26,11 +26,18 @@ const SCHEMAS = {
     id: id(o.id), date: date(o.date), total: numOrNull(o.total, -1e9, 1e9), store: str(o.store, 120),
     categoryId: id(o.categoryId), projectId: id(o.projectId), vehicleId: id(o.vehicleId),
     notes: str(o.notes, 2000), ocrText: str(o.ocrText, 100000), image: image(o.image),
+    thumb: image(o.thumb), hq: bool(o.hq),
     extraImages: (Array.isArray(o.extraImages) ? o.extraImages : []).map(image).filter(Boolean).slice(0, 9),
     isReturn: bool(o.isReturn), returnOf: id(o.returnOf),
+    cif: typeof o.cif === 'string' && /^(RO)?\d{2,10}$/.test(o.cif) ? o.cif : '', cifValid: bool(o.cifValid),
+    supplierName: str(o.supplierName, 120), supplierAddress: str(o.supplierAddress, 200),
+    supplierSource: ['anaf', 'bon'].includes(o.supplierSource) ? o.supplierSource : '',
+    cifRepaired: bool(o.cifRepaired), paid: numOrNull(o.paid, 0, 1e9),
+    totalSource: ['total', 'plata', 'estimat'].includes(o.totalSource) ? o.totalSource : '', reviewed: bool(o.reviewed),
     items: (Array.isArray(o.items) ? o.items : []).slice(0, 300).map((i) => ({
       id: id(i?.id), name: str(i?.name, 100).trim(), qty: numOrNull(i?.qty, -1e5, 1e5), unitPrice: numOrNull(i?.unitPrice, -1e7, 1e7),
       amount: numOrNull(i?.amount, -1e7, 1e7), sub: SUBCAT_KEYS.has(i?.sub) ? i.sub : 'other',
+      ean: typeof i?.ean === 'string' && /^\d{8,14}$/.test(i.ean) ? i.ean : '', ocrName: str(i?.ocrName, 100),
     })).filter((i) => i.id && i.name && i.amount !== null),
     fuel: o.fuel && typeof o.fuel === 'object' ? {
       liters: numOrNull(o.fuel.liters, 0, 1e5), pricePerLiter: numOrNull(o.fuel.pricePerLiter, 0, 1e4),
@@ -117,12 +124,33 @@ export function sanitizeInvSubs(v) {
   return list.length ? [...new Set(list)].slice(0, 20) : ['tools'];
 }
 
+// Numele corectate de utilizator: { „ean 5941234567890” sau „cheie produs” -> „Unt 200 g” }.
+export function sanitizeItemNames(obj) {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const [k, v] of Object.entries(obj).slice(0, 5000)) {
+    if (typeof k === 'string' && k.length <= 60 && /^[a-z0-9 ]+$/.test(k) && typeof v === 'string' && v.trim()) out[k] = str(v, 100).trim();
+  }
+  return out;
+}
+
 // Magazine învățate după CUI: { „RO17777320” -> „Hornbach” }.
 export function sanitizeStoreRules(obj) {
   const out = {};
   if (!obj || typeof obj !== 'object') return out;
   for (const [k, v] of Object.entries(obj).slice(0, 2000)) {
     if (/^(RO)?\d{4,10}$/.test(k) && typeof v === 'string' && v.trim()) out[k] = str(v, 60).trim();
+  }
+  return out;
+}
+
+// Rezultatele ANAF păstrate pe telefon: { „RO29226198” -> { name, address, ok, notFound, checkedAt } }.
+export function sanitizeCuiCache(obj) {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const [k, v] of Object.entries(obj).slice(0, 5000)) {
+    if (!/^(RO)?\d{2,10}$/.test(k) || !v || typeof v !== 'object') continue;
+    out[k] = { name: str(v.name, 120), address: str(v.address, 200), ok: bool(v.ok), notFound: bool(v.notFound), checkedAt: time(v.checkedAt) || 0 };
   }
   return out;
 }

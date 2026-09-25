@@ -190,3 +190,18 @@ test('„materiale” = doar materialele de pe bon; „casa” = bonurile între
   assert.equal(runQuery('Cât m-a costat casa?', ctx, today).total, 754.9);
   assert.equal(runQuery('cheltuieli mașină', ctx, today).total, 300);
 });
+
+test('rotirea imaginii: 90° + 270° = identic, dimensiuni inversate', async () => {
+  const { rotate } = await import('../js/preprocess.js');
+  const w = 3; const h = 2;
+  const px = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) px[i * 4] = i * 10;
+  const r90 = rotate(px, w, h, 90);
+  assert.deepEqual([r90.width, r90.height], [2, 3]);
+  // pixelul din stânga-sus ajunge în dreapta-sus
+  assert.equal(r90.data[(0 * 2 + 1) * 4], 0);
+  const back = rotate(r90.data, r90.width, r90.height, 270);
+  assert.deepEqual([...back.data].filter((_, i) => i % 4 === 0), [...px].filter((_, i) => i % 4 === 0));
+  const r180 = rotate(px, w, h, 180);
+  assert.equal(r180.data[0], 50);
+});

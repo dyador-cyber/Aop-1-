@@ -1,5 +1,5 @@
 // Produsele de pe bon: extragerea rândurilor și încadrarea pe subcategorii.
-import { normalize, parseAmount } from './parsers.js';
+import { normalize, parseAmount, levenshtein } from './parsers.js';
 
 export { isReturnText } from './parsers.js';
 
@@ -26,6 +26,9 @@ export const SUBCATS = [
   { key: 'sweets', group: 'food', name: 'Dulciuri & snacks', color: '#d81b60', words: ['ciocolata', 'biscuiti', 'napolitane', 'chips', 'bomboane', 'inghetata', 'prajitura', 'tort', 'alune', 'arahide', 'covrigei', 'popcorn', 'guma', 'milka', 'oreo', 'kinder', 'poiana', 'rom baton', 'eugenia', 'saratele', 'pufuleti', 'croissant umplut', 'strudel', 'gogoasa'] },
   { key: 'staples', group: 'food', name: 'Alimente de bază', color: '#ef6c00', words: ['faina', 'zahar', 'ulei', 'orez', 'paste', 'spaghete', 'malai', 'sare', 'piper', 'conserva', 'conserve', 'boia', 'otet', 'maioneza', 'ketchup', 'mustar', 'sos', 'supa', 'bulion', 'pasta tomate', 'fasole', 'linte', 'naut', 'mazare', 'porumb', 'cereale', 'fulgi', 'miere', 'gem', 'dulceata', 'drojdie', 'praf copt', 'condimente', 'masline'] },
   { key: 'auto', group: 'auto', name: 'Auto', color: '#3949ab', words: ['ulei motor', 'antigel', 'lichid parbriz', 'stergatoare', 'anvelope', 'anvelopa', 'motorina', 'benzina', 'aditiv', 'filtru ulei', 'filtru aer', 'filtru polen', 'placute frana', 'odorizant auto', 'polish', 'ceara auto'] },
+  { key: 'tobacco', group: 'tobacco', name: 'Tutun', color: '#6d6d6d', words: ['tigari', 'tigarete', 'tutun', 'trabuc', 'trabucuri', 'marlboro', 'kent', 'camel', 'winston', 'pall mall', 'lucky strike', 'dunhill', 'chesterfield', 'rothmans', 'vogue', 'iqos', 'heets', 'terea', 'glo', 'neo stick', 'viceroy', 'davidoff', 'parliament', 'philip morris', 'l m', 'bond street', 'sobranie', 'foi rulat', 'filtre tigari'] },
+  // garanția pentru ambalaje (sticle, doze, PET): banii se recuperează la returnarea ambalajului
+  { key: 'sgr', group: 'sgr', name: 'Garanție SGR (recuperabilă)', color: '#26a69a', words: ['sgr', 'garantie sgr'] },
   { key: 'pets', group: 'pets', name: 'Animale', color: '#6d4c41', words: ['hrana caini', 'hrana pisici', 'hrana', 'whiskas', 'pedigree', 'friskies', 'purina', 'nisip pisici', 'litiera'] },
   { key: 'other', group: 'other', name: 'Altele', color: '#757575', words: [] },
 ];
@@ -38,6 +41,8 @@ export const GROUPS = [
   { key: 'household', name: '🧽 Curățenie & igienă', alias: 'curatenie igiena' },
   { key: 'garden', name: '🌱 Grădină', alias: 'gradina' },
   { key: 'auto', name: '🚗 Auto', alias: 'auto' },
+  { key: 'tobacco', name: '🚬 Tutun', alias: 'tutun tigari' },
+  { key: 'sgr', name: '♻️ Garanții SGR', alias: 'sgr garantii ambalaje' },
   { key: 'pets', name: '🐾 Animale', alias: 'animale' },
   { key: 'other', name: 'Altele', alias: '' },
 ];
@@ -53,9 +58,11 @@ export function itemKey(name) {
 }
 
 // Alege subcategoria cu cel mai lung cuvânt-cheie potrivit (ex. „nisip pisici” bate „nisip”).
-export function classifyItem(name, learned = {}) {
+export function classifyItem(name, learned = {}, ean = '') {
+  if (ean && learned['ean ' + ean] && SUBCAT_KEYS.has(learned['ean ' + ean])) return learned['ean ' + ean];
   const key = itemKey(name);
   if (key && learned[key] && SUBCAT_KEYS.has(learned[key])) return learned[key];
+  if (SGR_RE.test(normalize(name))) return 'sgr';
   // secțiuni de cablu: „3X1,5 MM”, „3x2.5”, „2X0,75”
   const cable = /\b[2-5]\s?x\s?(0[,.]75|1|1[,.]5|2[,.]5|4|6|10)\s?(mm|mmp)?\b/i.test(normalize(name)) ? 'electrical' : null;
   const toks = tokens(name);
@@ -76,7 +83,63 @@ export function classifyItem(name, learned = {}) {
       if (hit && len > bestLen) { best = sc.key; bestLen = len; }
     }
   }
+  if (best === 'other') best = fuzzyClass(toks);
   return best;
+}
+
+// Ultima încercare pentru nume stricate de OCR („11ARLBORD” → Marlboro): cuvinte lungi,
+// cu cel mult 1–2 litere diferite de un cuvânt-cheie la fel de lung.
+function fuzzyClass(toks) {
+  const words = toks.map((t) => t.replace(/^\d+/, '')).filter((t) => t.length >= 6 && /^[a-z]+$/.test(t));
+  for (const sc of SUBCATS) {
+    for (const w of sc.words) {
+      if (w.length < 6 || w.includes(' ')) continue;
+      for (const t of words) {
+        if (Math.abs(t.length - w.length) > 1) continue;
+        if (levenshtein(t, w) <= (Math.min(t.length, w.length) >= 7 ? 2 : 1)) return sc.key;
+      }
+    }
+  }
+  return 'other';
+}
+
+// Garanția SGR, și când OCR citește „CARANTIE SCR”
+const SGR_RE = /\b[gc]arant[il]e\s+s[gc][rp]\b|\bsgr\b/;
+
+// Codul de bare (EAN-8/12/13/14) e valid dacă cifra de control se potrivește.
+export function validEan(code) {
+  const d = String(code || '');
+  if (!/^(\d{8}|\d{12,14})$/.test(d)) return false;
+  let sum = 0;
+  for (let i = d.length - 2, w = 3; i >= 0; i--, w = 4 - w) sum += +d[i] * w;
+  return (10 - (sum % 10)) % 10 === +d[d.length - 1];
+}
+
+// Rânduri „nume cantitate BUCATA X preț = sumă” (casele de marcat din magazinele mici, ex. Lisse):
+//   „FRANZELA LIDER PAN 300G 2 BUCATA x 2.50= 5.00 B”; cantitatea poate lipsi sau fi citită „|”, „!”.
+const BUCATA = /^(.*?)\s*(-?\d+(?:[.,]\d{1,3})?|[|!lI\]])?\s*\bbucat[ai]\b\.?\s*[xX×*]\s*(\d+(?:[.,]\s?\d{1,2})?(?:\s\d{2}(?!\d))?)\s*[=\-–]?\s*(.*)$/i;
+function unitFrom(s) {
+  let t = s.trim();
+  if (/^\d+\s\d{2}$/.test(t)) t = t.replace(/\s/, '.'); // „7 00” = 7,00
+  t = t.replace(/\s/g, '');
+  if (/^\d{3,}$/.test(t)) return +t / 100; // virgulă nevăzută: „250” = 2,50
+  return parseAmount(t);
+}
+function parseBucata(m) {
+  const qtyKnown = /\d/.test(m[2] || '');
+  let qty = qtyKnown ? parseAmount(m[2]) : 1;
+  const unit = unitFrom(m[3]);
+  if (!Number.isFinite(unit) || unit <= 0) return null;
+  const a = (m[4] || '').match(/(-?\d+)[.,]\s?(\d{2})/); // litera de TVA lipită de sumă („5.008” = 5,00 B)
+  let amount = a ? parseAmount(a[1] + '.' + a[2]) : NaN;
+  const calc = +(qty * unit).toFixed(2);
+  if (!Number.isFinite(amount)) amount = calc;
+  else if (Math.abs(Math.abs(amount) - Math.abs(calc)) > 0.011) {
+    const r = Math.abs(amount) / unit;
+    if (Math.round(r) >= 1 && Math.abs(r - Math.round(r)) < 0.01) qty = Math.sign(amount) * Math.round(r);
+    else amount = calc; // suma e citită greșit; cantitate × preț e mai sigur
+  }
+  return { qty, unitPrice: unit, amount };
 }
 
 // Rânduri care nu sunt produse.
@@ -101,6 +164,7 @@ function cleanName(s) {
   // resturi de OCR la început de rând („Sl 0) PROIECTOR”, „N SCAME”): cuvinte de 1–2 caractere care nu sunt majuscule curate
   const toks = out.split(' ');
   while (toks.length > 1 && toks[0].length <= 2 && !/^[A-Z]{2}$/.test(toks[0])) toks.shift();
+  while (toks.length > 1 && toks[toks.length - 1].length <= 2 && !/^[A-Z0-9]{1,2}$/.test(toks[toks.length - 1])) toks.pop();
   return toks.join(' ').slice(0, 80);
 }
 const letterCount = (s) => (s.match(/[A-Za-zĂÂÎȘȚăâîșț]/g) || []).length;
@@ -176,6 +240,7 @@ function mergeParts(acc, next) {
       (nameQuality(it.name) > nameQuality(a.name) && !(classifyItem(a.name) !== 'other' && classifyItem(it.name) === 'other'));
     if (better) a.name = it.name;
     if (a.qty == null && it.qty != null) { a.qty = it.qty; a.unitPrice = it.unitPrice; }
+    if (!a.ean && it.ean) a.ean = it.ean;
   }
   return out;
 }
@@ -186,14 +251,23 @@ function parsePart(text) {
       .replace(/(\d+)\s(\d{2})(\s+[A-Ea-e])$/, '$1,$2$3')) // „99 90 A” = 99,90 (virgulă nevăzută de OCR)
     .filter(Boolean);
   const items = [];
+  const eanLines = lines.filter((l) => /\b(?:ean|art)\W*\d{8,14}\b/i.test(l)).length;
   let pendingName = null;
   let pendingQty = null;
+  let pendingEan = '';
+  let lastWasItem = false;
   let started = false;
+  const push = (it) => {
+    if (pendingEan && !it.ean) it.ean = pendingEan;
+    pendingEan = '';
+    items.push(it);
+    started = true;
+    lastWasItem = true;
+  };
   // o cantitate rămasă fără rând de sumă: produsul e numele de deasupra, suma = cantitate × preț
   const flush = () => {
     if (pendingQty?.name && pendingQty.known && Number.isFinite(pendingQty.qty) && Number.isFinite(pendingQty.unit)) {
-      items.push({ name: pendingQty.name, qty: pendingQty.qty, unitPrice: pendingQty.unit, amount: +(pendingQty.qty * pendingQty.unit).toFixed(2) });
-      started = true;
+      push({ name: pendingQty.name, qty: pendingQty.qty, unitPrice: pendingQty.unit, amount: +(pendingQty.qty * pendingQty.unit).toFixed(2) });
     }
     pendingQty = null;
   };
@@ -201,11 +275,37 @@ function parsePart(text) {
     const n = normalize(line).replace(/[^a-z0-9 ]+/g, ' ');
     if (/\b(sub)?t[o0]tal\b|^\W*[it1l]?tal\b/.test(n.trim()) && (started || pendingQty)) break; // produsele se termină la TOTAL
     if (/\d{1,2}[./-]\d{1,2}[./-](20)?\d{2}\b/.test(line) || /\d{1,2}:\d{2}/.test(line)) { pendingName = null; continue; }
-    if (/=\s*\d/.test(line)) continue; // „CM: 2,000 M X 7,50 = 15,00” – calcul explicativ
+    // codul de bare: „ART/EAN 4022873020585” vine după produs (Hornbach) sau înainte (bon de retur)
+    const eanM = line.match(/\b(?:ean|art)\W*(\d{8,14})\b/i) || line.match(/^\W*(\d{8}|\d{12,14})\W*$/);
+    if (eanM) {
+      const code = eanM[1];
+      if (validEan(code)) {
+        const last = items[items.length - 1];
+        if (lastWasItem && last && !last.ean) last.ean = code;
+        // înaintea produsului doar pe bonurile cu un singur cod (retur); altfel codul ar ajunge la alt produs
+        else if (!lastWasItem && eanLines === 1) pendingEan = code;
+      }
+      lastWasItem = false;
+      continue;
+    }
+    const wasItem = lastWasItem;
+    lastWasItem = false;
+    const buc = line.match(BUCATA);
+    if (buc) {
+      const r = parseBucata(buc);
+      if (r) {
+        const own = cleanName(buc[1]);
+        const hasOwn = letterCount(own) >= 3 && letterCount(own) / own.replace(/\s/g, '').length >= 0.5;
+        const name = hasOwn ? own : pendingName;
+        if (name) { flush(); push({ name, ...r, rawUnit: r.unitPrice }); pendingName = null; continue; }
+      }
+    }
+    if (/=\s*\d/.test(line)) { lastWasItem = wasItem; continue; } // „CM: 2,000 M X 7,50 = 15,00” – calcul explicativ
     if (/\b(ron|lei)\b\s*-?\s*\d/i.test(line)) { pendingName = null; continue; } // „TOTAL: RON 1696,12” citit greșit
+    if (/^\W*\w{2,4}\s*[:;.]\s*r[o0]\s?[\dvzio ]{6,}/i.test(line)) { pendingName = null; continue; } // „CUL: RO1777 7320” (CUI citit greșit)
     const isDiscount = DISCOUNT.test(n);
     if (/\d{8,}/.test(line.replace(/\s/g, '')) && !AMOUNT_END.test(line)) continue; // coduri EAN, nr. bon
-    if (!isDiscount && SKIP.test(n)) { flush(); pendingName = null; continue; }
+    if (!isDiscount && SKIP.test(n) && !SGR_RE.test(n)) { flush(); pendingName = null; if (/\b(cm|nm|incl)\b/.test(n)) lastWasItem = wasItem; continue; }
 
     const tail = line.match(AMOUNT_END);
     let q = line.match(QTY);
@@ -214,6 +314,9 @@ function parsePart(text) {
       const u = line.match(QTY_UNIT);
       // forma lui q: [potrivire, cantitate, unitate, preț]
       if (u) q = Object.assign([u[0], '1', u[1], u[2]], { index: u.index });
+      // „Ms x 129,00”: unitatea și cantitatea sunt ilizibile, rămâne doar prețul
+      const g = !u && line.match(/^\W*[A-Za-z0-9.]{0,4}\s*[xX×*]\s*(\d+[.,]\d{2})\s*(?:lei|ron)?\W*$/i);
+      if (g) q = Object.assign([g[0], '1', '', g[1]], { index: g.index });
     }
     // rând doar cu cantitate × preț (fără sumă separată)
     const qtyOnly = q && (!tail || tail.index < q.index + q[0].length);
@@ -248,10 +351,9 @@ function parsePart(text) {
           if (abs < calc * 0.5) amount = Math.sign(amount || 1) * +calc.toFixed(2);
         }
       }
-      items.push({ name, qty: outQty, unitPrice: outUnit, amount, rawUnit: Number.isFinite(use.unit) ? use.unit : null });
+      push({ name, qty: outQty, unitPrice: outUnit, amount, rawUnit: Number.isFinite(use.unit) ? use.unit : null });
       pendingName = null;
       pendingQty = null;
-      started = true;
     } else if (qtyOnly) {
       // nu știm încă dacă numele e deasupra („LAPTE” / „2 x 7,49”) sau dedesubt („2 x 7,49” / „LAPTE 14,98”):
       // decidem la rândul următor
