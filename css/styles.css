@@ -399,3 +399,12 @@ nav.tabs { z-index: 13; }
 .month-bars small { font-size: .68rem; color: var(--muted); }
 @media print { #print-area figure { display: inline-block; width: 48%; margin: 1%; } #print-area figure img { max-height: 10cm; } #print-area figcaption { font-size: 9pt; text-align: center; } }
 .stat-row .stat b { overflow-wrap: break-word; font-size: .98rem; letter-spacing: -.2px; }
+
+/* ---------- prima pornire ---------- */
+.welcome h2 { margin: 0 0 6px; }
+.start-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 12px; }
+.start-grid button { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 8px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line); font-weight: 600; font-size: .88rem; color: var(--text); transition: transform .12s ease; }
+.start-grid button:active { transform: scale(.96); }
+.start-grid button span { font-size: 1.8rem; }
+.steps { padding-left: 20px; margin: 6px 0 10px; }
+.steps li { margin: 4px 0; }
