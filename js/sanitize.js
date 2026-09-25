@@ -18,6 +18,8 @@ const numOrNull = (v, min = -1e12, max = 1e12) => {
 };
 const date = (v) => (typeof v === 'string' && DATE_RE.test(v) && !Number.isNaN(Date.parse(v)) ? v : '');
 const bool = (v) => v === true;
+// iconiță = doar emoji (fără litere sau semne care ar putea forma cod)
+const icon = (v) => (typeof v === 'string' && /^[\p{Extended_Pictographic}\u200d\ufe0f\u20e3]{1,8}$/u.test(v) ? v : '');
 const time = (v) => numOrNull(v, 0, 1e14);
 const image = (v) => (typeof Blob !== 'undefined' && v instanceof Blob && IMAGE_TYPES.includes(v.type) && v.size <= 15e6 ? v : null);
 
@@ -38,6 +40,7 @@ const SCHEMAS = {
       id: id(i?.id), name: str(i?.name, 100).trim(), qty: numOrNull(i?.qty, -1e5, 1e5), unitPrice: numOrNull(i?.unitPrice, -1e7, 1e7),
       amount: numOrNull(i?.amount, -1e7, 1e7), sub: SUBCAT_KEYS.has(i?.sub) ? i.sub : 'other',
       ean: typeof i?.ean === 'string' && /^\d{8,14}$/.test(i.ean) ? i.ean : '', ocrName: str(i?.ocrName, 100),
+      projectId: id(i?.projectId),
     })).filter((i) => i.id && i.name && i.amount !== null),
     fuel: o.fuel && typeof o.fuel === 'object' ? {
       liters: numOrNull(o.fuel.liters, 0, 1e5), pricePerLiter: numOrNull(o.fuel.pricePerLiter, 0, 1e4),
@@ -64,6 +67,7 @@ const SCHEMAS = {
   categories: (o) => ({
     id: id(o.id), key: str(o.key, 30), name: str(o.name, 80), color: COLOR_RE.test(o.color) ? o.color : '#607d8b',
     isCar: bool(o.isCar), isFuel: bool(o.isFuel), order: numOrNull(o.order, 0, 1e6),
+    icon: icon(o.icon), parentId: id(o.parentId) === id(o.id) ? '' : id(o.parentId),
   }),
   inventory: (o) => ({
     id: id(o.id), name: str(o.name, 100).trim(), qty: Math.round(numOrNull(o.qty, 0, 1e4) ?? 1), price: numOrNull(o.price, 0, 1e8),
@@ -76,7 +80,11 @@ const SCHEMAS = {
       .filter((r) => r.expenseId && r.itemId),
     createdAt: time(o.createdAt),
   }),
-  projects: (o) => ({ id: id(o.id), name: str(o.name, 80), budget: numOrNull(o.budget, 0, 1e12), notes: str(o.notes, 2000) }),
+  projects: (o) => ({
+    id: id(o.id), name: str(o.name, 80), budget: numOrNull(o.budget, 0, 1e12), notes: str(o.notes, 2000),
+    kind: ['house', 'workshop', 'vehicle', 'other'].includes(o.kind) ? o.kind : '', icon: icon(o.icon),
+    color: COLOR_RE.test(o.color) ? o.color : '', vehicleId: id(o.vehicleId), order: numOrNull(o.order, 0, 1e6),
+  }),
 };
 
 // Returnează obiectul curățat sau null dacă nu poate fi folosit.
@@ -130,6 +138,16 @@ export function sanitizeItemNames(obj) {
   if (!obj || typeof obj !== 'object') return out;
   for (const [k, v] of Object.entries(obj).slice(0, 5000)) {
     if (typeof k === 'string' && k.length <= 60 && /^[a-z0-9 ]+$/.test(k) && typeof v === 'string' && v.trim()) out[k] = str(v, 100).trim();
+  }
+  return out;
+}
+
+// Proiectul obișnuit al fiecărui magazin: { „hornbach” -> id proiect }.
+export function sanitizeStoreProjects(obj) {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const [k, v] of Object.entries(obj).slice(0, 2000)) {
+    if (typeof k === 'string' && k.length <= 60 && /^[a-z0-9 ]+$/.test(k) && id(v)) out[k] = v;
   }
   return out;
 }
