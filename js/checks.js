@@ -1,6 +1,8 @@
 // „⚠️ De verificat”: ce anume poate fi greșit la un bon citit automat.
 // Se calculează din datele salvate, deci nu trebuie ținut nimic în plus în baza de date.
 
+import { toolDoubt } from './items.js';
+
 const money = (n) => (Math.round(Math.abs(n) * 100) / 100).toFixed(2).replace('.', ',');
 
 // Neidentificat = nu se știe ce e și numele citit n-a fost încă corectat de utilizator.
@@ -12,6 +14,9 @@ export function expenseFlags(e, now = Date.now()) {
   const items = Array.isArray(e.items) ? e.items : [];
   const total = typeof e.total === 'number' ? e.total : null;
   const unknown = items.filter(isUnknownItem).length;
+  // „POLIZOR 125 + DISC”: sculă (intră în inventar) sau consumabil? Decide utilizatorul, o singură dată.
+  const doubt = items.filter((i) => ['tools', 'consumables'].includes(i.sub) && !i.confirmed && toolDoubt(i.name)).length;
+  if (doubt) out.push({ key: 'tool-doubt', text: `🔧 ${doubt === 1 ? 'un produs' : `${doubt} produse`}: sculă sau consumabil? – alege subcategoria` });
   if (unknown) out.push({ key: 'items-unknown', text: `❓ ${unknown === 1 ? 'un produs neidentificat' : `${unknown} produse neidentificate`} – scrie numele corect, data viitoare îl recunosc singur` });
   if (total === null) out.push({ key: 'total-missing', text: 'Lipsește totalul' });
   else {

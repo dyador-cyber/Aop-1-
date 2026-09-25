@@ -51,7 +51,59 @@ export function findSimilar(name, inventory, { excludeIds = [] } = {}) {
     .map((r) => r.x);
 }
 
+// Eticheta scurtă scrisă pe sculă (B1, B2 pentru bormașini, P1 pentru polizor…),
+// ca să știi exact care dintre două scule la fel s-a întors stricată.
+const LABEL_PREFIX = [
+  ['B', ['bormasin', 'masina de gaurit', 'rotopercutor']],
+  ['F', ['flex']],
+  ['P', ['polizor']],
+  ['S', ['surubelnit', 'autofiletant', 'masina de insurubat']],
+  ['L', ['proiector', 'reflector', 'lampa', 'lanterna']],
+  ['C', ['circular']],
+  ['T', ['pendular']],
+  ['D', ['drujba', 'motofierastrau']],
+  ['G', ['generator']],
+  ['K', ['compresor']],
+  ['U', ['sudura', 'invertor']],
+  ['SL', ['slefuit', 'slefuitor']],
+  ['A', ['aspirator']],
+  ['N', ['nivela', 'telemetru']],
+];
+export function labelPrefix(name) {
+  const n = ' ' + normalize(name).replace(/[^a-z0-9 ]+/g, ' ') + ' ';
+  for (const [p, words] of LABEL_PREFIX) if (words.some((w) => n.includes(' ' + w))) return p;
+  const w = normalize(name).match(/[a-z]{3,}/);
+  return w ? w[0][0].toUpperCase() : 'X';
+}
+export function nextLabel(name, inventory) {
+  const p = labelPrefix(name);
+  const re = new RegExp(`^${p}(\\d+)$`);
+  const max = inventory.reduce((m, x) => { const r = re.exec(x.label || ''); return r ? Math.max(m, +r[1]) : m; }, 0);
+  return p + (max + 1);
+}
+
+// Sculele vechi ținute cu „Bucăți: 2” devin bucăți separate, fiecare cu eticheta ei.
+export function splitUnits(inventory, uid) {
+  const puts = [];
+  const all = inventory.map((x) => ({ ...x }));
+  for (const x of all) {
+    const n = Math.max(1, Math.round(x.qty || 1));
+    const changed = n > 1 || !x.label;
+    if (!changed) continue;
+    const first = { ...x, qty: 1, unit: x.unit ?? 0, label: x.label || nextLabel(x.name, [...all, ...puts]) };
+    Object.assign(x, first);
+    puts.push(first);
+    for (let k = 1; k < n; k++) {
+      const copy = { ...first, id: uid(), unit: (first.unit || 0) + k, returns: [], loans: [], label: '' };
+      copy.label = nextLabel(copy.name, [...all, ...puts]);
+      puts.push(copy);
+    }
+  }
+  return puts;
+}
+
 // Ce trebuie schimbat în inventar după salvarea unui bon.
+// Fiecare bucată cumpărată e o intrare separată (2 bormașini = B1 și B2).
 // Returnează { puts: [intrări de salvat], dels: [id-uri de șters], added: [], returned: [], unmatched: [] }.
 export function syncFromExpense(e, inventory, { subs = ['tools'], uid, now = Date.now() } = {}) {
   const out = { puts: [], dels: [], added: [], returned: [], unmatched: [] };
@@ -61,22 +113,25 @@ export function syncFromExpense(e, inventory, { subs = ['tools'], uid, now = Dat
   const wanted = (e.items || []).filter((i) => wantedSub(i) && i.amount > 0);
   const linked = inventory.filter((x) => x.expenseId === e.id && x.itemId);
   for (const i of wanted) {
-    const qty = Math.max(1, Math.round(i.qty > 0 ? i.qty : 1));
+    const qty = Math.min(50, Math.max(1, Math.round(i.qty > 0 ? i.qty : 1)));
     const price = i.unitPrice > 0 ? i.unitPrice : +(i.amount / qty).toFixed(2);
-    const ex = linked.find((x) => x.itemId === i.id);
-    if (!ex) {
-      const entry = {
-        id: uid(), name: i.name, qty, price, purchaseDate: e.date, store: e.store || '', expenseId: e.id, itemId: i.id,
-        sub: i.sub, location: '', status: 'avail', lentTo: '', lentDate: '', warrantyUntil: addMonths(e.date, WARRANTY_MONTHS),
-        notes: '', auto: true, edited: false, returns: [], createdAt: now,
-      };
-      out.puts.push(entry);
-      out.added.push(entry);
-    } else if (!ex.edited) {
-      // după un retur cantitatea a fost deja scăzută: n-o mai suprascriem
-      const q = (ex.returns || []).length ? ex.qty : qty;
-      out.puts.push({ ...ex, name: i.name, qty: q, price, purchaseDate: e.date, store: e.store || '', sub: i.sub, warrantyUntil: addMonths(e.date, WARRANTY_MONTHS) });
+    const units = linked.filter((x) => x.itemId === i.id);
+    for (let k = 0; k < qty; k++) {
+      const ex = units.find((x) => (x.unit ?? 0) === k);
+      if (!ex) {
+        const entry = {
+          id: uid(), name: i.name, qty: 1, unit: k, label: nextLabel(i.name, [...inventory, ...out.puts]), serial: '', price, purchaseDate: e.date,
+          store: e.store || '', expenseId: e.id, itemId: i.id, sub: i.sub, location: '', status: 'avail', lentTo: '', lentDate: '', loans: [],
+          warrantyUntil: addMonths(e.date, WARRANTY_MONTHS), notes: '', auto: true, edited: false, returns: [], createdAt: now,
+        };
+        out.puts.push(entry);
+        out.added.push(entry);
+      } else if (!ex.edited) {
+        out.puts.push({ ...ex, name: i.name, price, purchaseDate: e.date, store: e.store || '', sub: i.sub, warrantyUntil: addMonths(e.date, WARRANTY_MONTHS) });
+      }
     }
+    // cantitate micșorată pe bon: bucățile în plus, neatinse, dispar
+    for (const x of units) if ((x.unit ?? 0) >= qty && !x.edited && !(x.returns || []).length && x.status === 'avail') out.dels.push(x.id);
   }
   // produse scoase de pe bon sau mutate în altă subcategorie
   for (const x of linked) {
@@ -85,7 +140,7 @@ export function syncFromExpense(e, inventory, { subs = ['tools'], uid, now = Dat
   return out;
 }
 
-// Un bon de retur: găsește scula cumpărată și o scade / o marchează „Returnată”.
+// Un bon de retur: găsește bucățile cumpărate și le marchează „Returnată”.
 function applyReturn(e, inventory, { subs, out }) {
   const done = new Set(inventory.flatMap((x) => (x.returns || []).map((r) => `${r.expenseId}:${r.itemId}`)));
   const inv = inventory.map((x) => ({ ...x, returns: [...(x.returns || [])] }));
@@ -93,25 +148,48 @@ function applyReturn(e, inventory, { subs, out }) {
   const storeN = normalize(e.store);
   for (const i of (e.items || []).filter((it) => subs.includes(it.sub))) {
     if (done.has(`${e.id}:${i.id}`)) continue;
-    const n = Math.max(1, Math.round(Math.abs(i.qty || 1)));
+    let n = Math.max(1, Math.round(Math.abs(i.qty || 1)));
     // prețul returnat pe bucată: dovadă puternică, alături de legătura cu bonul original
     const unit = Math.abs(i.unitPrice || (i.amount / (Math.abs(i.qty || 1) || 1)));
     const cands = inv
       .filter((x) => OWNED.has(x.status) && x.qty > 0)
       .map((x) => ({ x, s: similarity(x.name, i.name), samePrice: x.price > 0 && Math.abs(x.price - unit) < 0.011 }))
       .filter((c) => c.s >= 0.6 || (c.samePrice && (c.s >= 0.3 || (e.returnOf && c.x.expenseId === e.returnOf))))
-      .map((c) => ({ ...c, score: c.s + (e.returnOf && c.x.expenseId === e.returnOf ? 2 : 0) + (storeN && normalize(c.x.store) === storeN ? 1 : 0) }))
-      .sort((a, b) => b.score - a.score || (b.x.purchaseDate || '').localeCompare(a.x.purchaseDate || ''));
-    const best = cands[0]?.x;
-    if (!best) { out.unmatched.push(i.name); continue; }
-    best.returns.push({ expenseId: e.id, itemId: i.id, qty: n });
-    if (best.qty > n) best.qty -= n;
-    else best.status = 'returned';
-    changed.set(best.id, best);
-    out.returned.push(best);
+      .map((c) => ({ ...c, score: c.s + (e.returnOf && c.x.expenseId === e.returnOf ? 2 : 0) + (storeN && normalize(c.x.store) === storeN ? 1 : 0) + (c.x.status === 'avail' ? 0.5 : 0) }))
+      .sort((a, b) => b.score - a.score || (b.x.purchaseDate || '').localeCompare(a.x.purchaseDate || '') || (b.x.unit ?? 0) - (a.x.unit ?? 0));
+    if (!cands.length) { out.unmatched.push(i.name); continue; }
+    for (const { x } of cands) {
+      if (n <= 0) break;
+      const take = Math.min(n, x.qty || 1); // o intrare veche cu mai multe bucăți
+      x.returns.push({ expenseId: e.id, itemId: i.id, qty: take });
+      if ((x.qty || 1) > take) x.qty -= take; else x.status = 'returned';
+      n -= take;
+      changed.set(x.id, x);
+      out.returned.push(x);
+    }
+    if (n > 0) out.unmatched.push(i.name);
   }
   out.puts.push(...changed.values());
   return out;
+}
+
+// Împrumut: cui și când; la întoarcere, în ce stare a venit scula.
+export const RETURN_STATES = [
+  { key: 'ok', name: 'În regulă', status: 'avail' },
+  { key: 'broken', name: 'Stricată', status: 'broken' },
+  { key: 'repair', name: 'De dus la reparat', status: 'repair' },
+  { key: 'missing', name: 'Lipsesc accesorii', status: 'avail' },
+];
+export function lendTool(x, to, date) {
+  return { ...x, status: 'lent', lentTo: to, lentDate: date, loans: [...(x.loans || []), { to, from: date, back: '', state: '', note: '' }] };
+}
+export function returnTool(x, date, state = 'ok', note = '') {
+  const loans = (x.loans || []).map((l) => ({ ...l }));
+  const open = [...loans].reverse().find((l) => !l.back);
+  if (open) Object.assign(open, { back: date, state, note });
+  else loans.push({ to: x.lentTo || '?', from: x.lentDate || date, back: date, state, note });
+  const st = RETURN_STATES.find((r) => r.key === state) || RETURN_STATES[0];
+  return { ...x, status: st.status, lentTo: '', lentDate: '', loans };
 }
 
 // La ștergerea unui bon: sculele adăugate automat dispar, iar un retur șters le readuce.

@@ -322,3 +322,63 @@ nav.tabs { z-index: 13; }
   #view.enter { animation: none; }
   .sheet, .tile, .cb-bar span { transition: none; }
 }
+
+/* ---------- Etapa 3: inventar, situații, cămară ---------- */
+.stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 0 0 12px; }
+.stat-row .stat { background: var(--card); border-radius: var(--radius); padding: 10px 8px; box-shadow: 0 1px 3px rgba(0,0,0,.06); display: flex; flex-direction: column; min-width: 0; }
+.stat-row .stat b { font-size: 1.05rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-row .stat span { font-size: .7rem; color: var(--muted); }
+.stat-row .stat.warn b { color: var(--warn); }
+.stat-row.mini { margin: 8px 0; }
+.stat-row.mini .stat { background: var(--bg); box-shadow: none; padding: 8px 6px; }
+.stat-row.mini .stat b { font-size: .9rem; }
+@media (max-width: 380px) { .stat-row { grid-template-columns: repeat(2, 1fr); } }
+
+.tool-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+@media (min-width: 560px) { .tool-grid { grid-template-columns: repeat(3, 1fr); } }
+.tool-card { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; text-align: left; padding: 10px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line); min-width: 0; color: var(--text); transition: transform .12s ease; }
+.tool-card:active { transform: scale(.97); }
+.tool-card.st-lent { border-color: var(--warn); }
+.tool-card.st-broken, .tool-card.st-lost { border-color: var(--bad); }
+.tool-pic { position: relative; width: 100%; height: 76px; border-radius: 10px; background: var(--card); display: grid; place-items: center; font-size: 2rem; overflow: hidden; }
+.tool-pic img { width: 100%; height: 100%; object-fit: cover; }
+.tool-label { position: absolute; top: 6px; left: 6px; background: var(--accent); color: #fff; font-weight: 800; font-size: .9rem; padding: 2px 8px; border-radius: 8px; letter-spacing: .5px; }
+.tool-name { font-weight: 600; font-size: .88rem; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.tool-sub { font-size: .75rem; color: var(--muted); }
+.tool-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.tool-tags .badge { font-size: .68rem; }
+
+.grid-label { display: grid; grid-template-columns: 90px 1fr; gap: 8px; }
+.grid-label input[name=label] { font-weight: 800; text-transform: uppercase; }
+.loan-box, .warranty-box { border-radius: 12px; padding: 10px 12px; margin: 8px 0; background: var(--bg); border: 1px solid var(--line); }
+.loan-box input { margin-bottom: 8px; }
+.warranty-box.ok { background: var(--ok-soft); border-color: transparent; }
+.warranty-box .row-flex { margin-top: 8px; }
+.loan-list { margin: 6px 0; padding-left: 18px; font-size: .88rem; }
+.loan-list li { margin: 3px 0; }
+
+.pad-x { padding: 0 6px; }
+.sit-card { background: var(--card); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.sit-head { display: flex; gap: 8px; align-items: flex-start; }
+.sit-big { font-size: 1.7rem; font-weight: 800; margin-top: 6px; }
+.sit-big small { font-size: .8rem; font-weight: 400; color: var(--muted); }
+.chip-s { display: inline-flex; align-items: center; gap: 4px; font-size: .75rem; padding: 3px 8px; border-radius: 12px; background: var(--accent-soft); color: var(--text); border: 0; margin: 2px 2px 2px 0; min-height: 0; }
+.chip-s.click { cursor: pointer; }
+.star { min-width: 42px; min-height: 42px; padding: 0; font-size: 1.4rem; border-radius: 12px; background: var(--bg); border: 0; }
+.star.on { background: var(--warn-soft); }
+
+.pantry { list-style: none; padding: 0; margin: 0; }
+.pantry li { display: flex; align-items: center; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); }
+.pantry li:first-child { border-top: 0; }
+.pantry li button { min-height: 36px; padding: 4px 10px; font-size: .85rem; }
+.pantry li.low b { color: var(--warn); }
+.pantry li.empty b { color: var(--bad); }
+
+.group-cards { display: grid; gap: 10px; }
+.group-card { background: var(--bg); border-radius: 12px; padding: 10px 12px; }
+.group-card .chips { margin-top: 4px; }
+.stat-row .stat b { white-space: normal; overflow-wrap: anywhere; line-height: 1.15; }
+.stat-row.mini { grid-template-columns: repeat(2, 1fr); }
+.chip-wrap { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.chip-wrap .chip-s { margin: 0; white-space: nowrap; }
+.chip-s .dot { margin: 0 2px 0 0; flex: none; }
