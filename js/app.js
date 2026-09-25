@@ -23,7 +23,7 @@ const DEFAULT_CATEGORIES = [
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
 // Afișată în Setări: arată dacă telefonul a luat ultima actualizare.
-const APP_VERSION = '2026.09.25-1';
+const APP_VERSION = '2026.09.25-2';
 const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
 
@@ -178,6 +178,7 @@ function expenseRow(e) {
     <div class="grow">
       <div class="title">${e.isReturn ? '↩️ ' : ''}${esc(e.store || 'Fără nume')}${e.extraImages?.length ? ` <span class="muted small">📄×${e.extraImages.length + 1}</span>` : ''}</div>
       <div class="sub">${fmtDate(e.date)} · <span class="dot" style="background:${esc(cat?.color || '#999')}"></span>${esc(cat?.name || 'Fără categorie')}${proj ? ' · 📁 ' + esc(proj.name) : ''}${fuel}</div>
+      ${e.items?.length ? `<div class="sub items-peek">🧾 ${esc(e.items.slice(0, 4).map((i) => i.name).join(', '))}${e.items.length > 4 ? ` +${e.items.length - 4}` : ''}</div>` : ''}
       ${flags.length ? `<div class="sub warn-text">${flags[0].text.startsWith('❓') ? '' : '⚠️ '}${esc(flags[0].text.replace(/ – .*/, ''))}${flags.length > 1 ? ` (+${flags.length - 1})` : ''}</div>` : ''}
     </div>
     <div class="amount">${money(e.total)}</div>
@@ -562,7 +563,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       <label>Tip carburant<input name="fuelType" list="fuel-types" value="${esc(exp.fuel?.fuelType || '')}"></label>
       <datalist id="fuel-types"><option>benzină</option><option>motorină</option><option>GPL</option><option>electric (kWh)</option></datalist>
     </fieldset>
-    <details id="items-box" ${exp.items?.length ? 'open' : ''}><summary>🧾 Produse (<span id="items-count">0</span>) <span id="items-sum" class="muted small"></span></summary>
+    <details id="items-box" ${exp.items?.length || (!isNew && exp.image) ? 'open' : ''}><summary>🧾 Produse (<span id="items-count">0</span>) <span id="items-sum" class="muted small"></span></summary>
       <div id="items-list"></div>
       <button type="button" id="item-add" class="link">+ Adaugă produs</button>
     </details>
@@ -672,7 +673,9 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
         <select class="it-sub" aria-label="Subcategorie">${subOptions(i.sub)}</select>
         <button type="button" class="it-del" aria-label="Șterge produsul">✕</button>
         ${itemMeta(i)}</div>`).join('')
-        || '<p class="muted small">Niciun produs citit. Le poți adăuga manual.</p>';
+        || (exp.image
+          ? '<p class="small warn-box">Niciun produs citit. <button type="button" class="link" data-reread>🔍 Recitește bonul</button> – un bon salvat înainte de actualizare se citește din nou și apar produsele. Le poți adăuga și manual.</p>'
+          : '<p class="muted small">Niciun produs citit. Le poți adăuga manual.</p>');
       updateItemsSum();
     };
     // „2 × 2,50 lei · ❓ neidentificat”: detaliile de sub fiecare produs
@@ -753,7 +756,13 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       renderItems();
     };
     form.isReturn.addEventListener('change', () => syncReturn(true));
+    // bon salvat fără produse, dar cu text citit: încercăm produsele din text (fără OCR din nou)
+    if (!isNew && !exp.items.length && exp.ocrText) {
+      exp.items = itemsFromText(exp.ocrText, exp.isReturn);
+      itemsTouched = false;
+    }
     renderItems();
+    $('#items-list', root).addEventListener('click', (ev) => { if (ev.target.closest('[data-reread]')) doOcr(); });
     if (exp.isReturn) fillReturnOf();
 
     // Bonurile lungi: fiecare poză e citită separat, textele se lipesc în ordine
@@ -801,11 +810,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       set('total', r.total != null ? r.total.toFixed(2) : '');
       if (!touched.has('isReturn') && r.isReturn !== form.isReturn.checked) { form.isReturn.checked = r.isReturn; }
       if (!itemsTouched) {
-        exp.items = parseItems(text, { isReturn: r.isReturn }).map((i) => {
-          // numele corectat data trecută (după codul de bare sau după primele cuvinte citite)
-          const name = (i.ean && state.itemNames['ean ' + i.ean]) || state.itemNames[itemKey(i.name)] || i.name;
-          return { id: db.uid(), ...i, ocrName: i.name, name, sub: classifyItem(name, state.itemRules, i.ean) };
-        });
+        exp.items = itemsFromText(text, r.isReturn);
         if (exp.items.length) $('#items-box', root).open = true;
       }
       syncReturn(true);
@@ -1243,6 +1248,15 @@ async function backfillThumbs() {
     const e = state.expenses.find((x) => x.id === id);
     if (e) e.thumb = thumb;
   }
+}
+
+// Produsele din textul citit, cu numele și subcategoriile învățate din corecturi.
+function itemsFromText(text, isReturn) {
+  return parseItems(text, { isReturn }).map((i) => {
+    // numele corectat data trecută (după codul de bare sau după primele cuvinte citite)
+    const name = (i.ean && state.itemNames['ean ' + i.ean]) || state.itemNames[itemKey(i.name)] || i.name;
+    return { id: db.uid(), ...i, ocrName: i.name, name, sub: classifyItem(name, state.itemRules, i.ean) };
+  });
 }
 
 function newExpense(extra = {}) {

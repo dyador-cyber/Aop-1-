@@ -246,3 +246,5 @@ table.breakdown tr.sub-row td { border-top: 0; padding-top: 2px; padding-bottom:
 }
 header.top h1 small { font-weight: 400; font-size: .8rem; opacity: .85; }
 .center-btn { display: block; margin: 8px auto 16px; }
+.items-peek { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62vw; }
+.warn-box { background: var(--warn-soft, #fff4d6); border-radius: 8px; padding: 6px 10px; }
