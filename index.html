@@ -18,12 +18,27 @@
   <header class="top"><h1>🧾 Fiscan <small>· bonuri, scule, mașini</small></h1></header>
   <main id="view"><p class="center muted">Se încarcă…</p></main>
 
-  <nav class="tabs">
+  <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+  <div id="more-sheet" class="sheet" aria-hidden="true" role="dialog" aria-label="Mai mult">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-grid">
+      <button data-go="lists"><span>📝</span>Liste</button>
+      <button data-go="products"><span>📊</span>Produse</button>
+      <button data-go="new-project"><span>📁</span>Proiect nou</button>
+      <button data-go="ask"><span>💬</span>Întreabă</button>
+      <button data-go="check"><span>⚠️</span>De verificat</button>
+      <button data-go="settings"><span>⚙️</span>Setări</button>
+      <button data-go="export"><span>⬇️</span>Export &amp; backup</button>
+      <button data-go="categories"><span>🗂️</span>Categorii</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <div class="nav-grip" aria-hidden="true"></div>
     <button data-view="home"><span>🏠</span>Acasă</button>
     <button data-view="receipts"><span>🧾</span>Bonuri</button>
+    <button data-view="inventory"><span>🧰</span>Inventar</button>
     <button data-view="car"><span>🚗</span>Mașină</button>
-    <button data-view="lists"><span>📝</span>Liste</button>
-    <button data-view="settings"><span>⚙️</span>Setări</button>
+    <button data-more><span>☰</span>Mai mult</button>
   </nav>
 
   <dialog id="modal">

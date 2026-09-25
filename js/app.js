@@ -4,10 +4,11 @@ import { lookupCui } from './anaf.js';
 import { expenseFlags, isUnknownItem } from './checks.js';
 import { shareReceiptPhotos, printReceipts } from './copy.js';
 import { recognize, compressImage as compressRaw } from './ocr.js';
-import { sanitize, sanitizeRules, sanitizeInvSubs, sanitizeStoreRules, sanitizeCuiCache, sanitizeItemNames, safeImageDataURL, csvCell, icsText } from './sanitize.js';
+import { sanitize, sanitizeRules, sanitizeInvSubs, sanitizeStoreRules, sanitizeCuiCache, sanitizeItemNames, sanitizeStoreProjects, safeImageDataURL, csvCell, icsText } from './sanitize.js';
 import { SUBCATS, GROUPS, groupOf, subcatByKey, classifyItem, parseItems, itemKey } from './items.js';
 import { INV_STATUSES, OWNED, statusByKey, syncFromExpense, undoExpense, findSimilar, addMonths, WARRANTY_MONTHS } from './inventory.js';
 import { encryptText, decryptText } from './crypto.js';
+import { PROJECT_KINDS, PROJECT_ICONS, PROJECT_COLORS, SUGGESTED_PROJECTS, PERIODS, kindOf, periodRange, inRange, expenseShares, projectTotals, projectExpenses, categoryTree, categoryBreakdown, planMigration } from './projects.js';
 
 const RC = globalThis.ReminderCore;
 
@@ -23,7 +24,7 @@ const DEFAULT_CATEGORIES = [
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
 // Afișată în Setări: arată dacă telefonul a luat ultima actualizare.
-const APP_VERSION = '2026.09.25-5';
+const APP_VERSION = '2026.09.25-6';
 const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
 
@@ -42,7 +43,11 @@ const state = {
   storeRules: {},
   cuiCache: {},
   itemNames: {},
+  storeProjects: {},
   anafStatus: null,
+  period: { key: 'month', from: '', to: '' },
+  projectId: null, projCat: '',
+  projectsSetup: true,
   invFilter: { q: '', status: 'owned', loc: '' },
 };
 
@@ -55,6 +60,16 @@ const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${Stri
 const bonuri = (n) => `${n} ${n === 1 ? 'bon' : 'bonuri'}`;
 const fmtDate = (s) => (s ? esc(String(s).split('-').reverse().join('.')) : '—');
 const catById = (id) => state.categories.find((c) => c.id === id);
+// „Copii › Haine” pentru subcategorii
+const catLabel = (c) => { const p = c?.parentId && catById(c.parentId); return c ? `${p ? p.name + ' › ' : ''}${c.name}` : ''; };
+const catOptions = (selected, empty = '— alege —') => `<option value="">${esc(empty)}</option>` + categoryTree(state.categories).map((c) =>
+  `<option value="${esc(c.id)}" ${c.id === selected ? 'selected' : ''}>${esc(c.icon ? c.icon + ' ' : '')}${esc(c.name)}</option>` +
+  c.children.map((x) => `<option value="${esc(x.id)}" ${x.id === selected ? 'selected' : ''}>\u00a0\u00a0\u00a0↳ ${esc(x.name)}</option>`).join('')).join('');
+const projIcon = (p) => (p ? p.icon || kindOf(p.kind).icon : '📥');
+const projOptions = (selected, empty = '— fără proiect —') => `<option value="">${esc(empty)}</option>` + state.projects.map((p) =>
+  `<option value="${esc(p.id)}" ${p.id === selected ? 'selected' : ''}>${esc(projIcon(p))} ${esc(p.name)}</option>`).join('');
+const vehicleProject = (vid) => state.projects.find((p) => p.vehicleId && p.vehicleId === vid);
+const storeKey = (s) => normalize(s).replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
 const projById = (id) => state.projects.find((p) => p.id === id);
 const vehById = (id) => state.vehicles.find((v) => v.id === id);
 const toNum = (v) => { const n = parseFloat(String(v).replace(',', '.')); return Number.isFinite(n) ? n : null; };
@@ -105,12 +120,14 @@ async function loadAll() {
   state.storeRules = sanitizeStoreRules((await db.get('meta', 'storeRules'))?.rules);
   state.cuiCache = sanitizeCuiCache((await db.get('meta', 'cuiCache'))?.data);
   state.itemNames = sanitizeItemNames((await db.get('meta', 'itemNames'))?.data);
+  state.storeProjects = sanitizeStoreProjects((await db.get('meta', 'storeProjects'))?.data);
+  state.projectsSetup = !!(await db.get('meta', 'projectsSetup'))?.done;
   const st = await db.get('meta', 'anafStatus');
   state.anafStatus = st && typeof st.at === 'number' ? { ok: st.ok === true, at: st.at } : null;
 }
 function sortState() {
   state.categories.sort((a, b) => (a.order ?? 99) - (b.order ?? 99) || a.name.localeCompare(b.name));
-  state.projects.sort((a, b) => a.name.localeCompare(b.name));
+  state.projects.sort((a, b) => (a.order ?? 999) - (b.order ?? 999) || a.name.localeCompare(b.name));
   state.inventory.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -119,7 +136,27 @@ async function seed() {
   if (cats.length) return;
   let i = 0;
   for (const c of DEFAULT_CATEGORIES) await db.put('categories', { id: db.uid(), order: i++, ...c });
-  await db.put('projects', { id: db.uid(), name: 'Construcție casă', notes: '' });
+}
+
+// Trecerea la proiecte (Etapa 2): se păstrează întâi o copie a legăturilor bon → categorie / proiect,
+// apoi categoriile implicite primesc nume fără „Casă –”/„Mașină –”, apar categoriile noi
+// (Utilități, Electrice, Copii cu subcategorii) și fiecare mașină devine proiect. Nu se șterge nimic.
+async function migrate() {
+  if (((await db.get('meta', 'schema'))?.v || 0) >= 3) return;
+  await db.put('meta', {
+    id: 'backupBeforeV3', at: Date.now(), categories: state.categories, projects: state.projects,
+    expenses: state.expenses.map((e) => ({ id: e.id, categoryId: e.categoryId, projectId: e.projectId, vehicleId: e.vehicleId })),
+  });
+  const m = planMigration(state, db.uid);
+  for (const [store, list] of [['categories', m.categories], ['projects', m.projects]]) {
+    for (const o of list) { const c = sanitize(store, o); if (c) await db.put(store, c); }
+  }
+  for (const e of m.expenses) {
+    const raw = await db.get('expenses', e.id); // cu pozele, exact cum e salvat
+    if (raw) await db.put('expenses', { ...raw, projectId: e.projectId });
+  }
+  await db.put('meta', { id: 'schema', v: 3 });
+  await loadAll();
 }
 
 async function save(store, obj) {
@@ -160,14 +197,23 @@ function options(list, selected, empty = '— nimic —') {
 }
 
 // ---------- randare ----------
-const VIEWS = { home: renderHome, receipts: renderReceipts, car: renderCar, lists: renderLists, settings: renderSettings };
+const VIEWS = { home: renderHome, project: renderProject, receipts: renderReceipts, inventory: () => renderInventory(), car: renderCar, lists: renderLists, settings: renderSettings };
 
 function render() {
-  document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === state.view));
-  $('#view').innerHTML = VIEWS[state.view]();
+  const tab = state.view === 'project' ? 'home' : state.view;
+  document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === tab || (b.dataset.more !== undefined && ['lists', 'settings'].includes(tab))));
+  const v = $('#view');
+  const changed = v.dataset.view !== state.view;
+  v.innerHTML = (VIEWS[state.view] || renderHome)();
+  v.dataset.view = state.view;
+  // animație scurtă doar la schimbarea ecranului (nu la fiecare redesenare)
+  if (changed) { v.classList.remove('enter'); void v.offsetWidth; v.classList.add('enter'); }
 }
 
-function expenseRow(e) {
+// opts.share = cât din bon revine proiectului afișat (când bonul e împărțit).
+// (folosită și direct în .map(), care trimite indexul ca al doilea argument – de aceea obiect)
+function expenseRow(e, opts) {
+  const share = opts && typeof opts === 'object' ? opts.share : null;
   const cat = catById(e.categoryId);
   const proj = projById(e.projectId);
   const img = blobURL(e.thumb || e.image);
@@ -177,11 +223,11 @@ function expenseRow(e) {
     ${img ? `<img class="thumb" src="${img}" alt="" loading="lazy" decoding="async">` : '<div class="thumb ph">🧾</div>'}
     <div class="grow">
       <div class="title">${e.isReturn ? '↩️ ' : ''}${esc(e.store || 'Fără nume')}${e.extraImages?.length ? ` <span class="muted small">📄×${e.extraImages.length + 1}</span>` : ''}</div>
-      <div class="sub">${fmtDate(e.date)} · <span class="dot" style="background:${esc(cat?.color || '#999')}"></span>${esc(cat?.name || 'Fără categorie')}${proj ? ' · 📁 ' + esc(proj.name) : ''}${fuel}</div>
+      <div class="sub">${fmtDate(e.date)} · <span class="dot" style="background:${esc(cat?.color || '#999')}"></span>${esc(catLabel(cat) || 'Fără categorie')}${proj ? ` · ${esc(projIcon(proj))} ${esc(proj.name)}` : ''}${fuel}${(e.items || []).some((i) => i.projectId && i.projectId !== e.projectId) ? ' · ✂️ împărțit' : ''}</div>
       ${e.items?.length ? `<div class="sub items-peek">🧾 ${esc(e.items.slice(0, 4).map((i) => i.name).join(', '))}${e.items.length > 4 ? ` +${e.items.length - 4}` : ''}</div>` : ''}
       ${flags.length ? `<div class="sub warn-text">${flags[0].text.startsWith('❓') ? '' : '⚠️ '}${esc(flags[0].text.replace(/ – .*/, ''))}${flags.length > 1 ? ` (+${flags.length - 1})` : ''}</div>` : ''}
     </div>
-    <div class="amount">${money(e.total)}</div>
+    <div class="amount">${share != null && Math.abs(share - (+e.total || 0)) > 0.004 ? `${money(share)}<div class="muted small">din ${money(e.total)}</div>` : money(e.total)}</div>
   </li>`;
 }
 
@@ -231,31 +277,56 @@ function renderAskResult() {
   </div>`;
 }
 
+// Alegerea perioadei (azi, săptămâna, luna, anul, total, interval) – aceeași pe toate ecranele.
+function periodChips() {
+  const p = state.period;
+  return `<div class="period-chips" role="tablist">${PERIODS.map((x) => `<button class="pchip ${x.key === p.key ? 'on' : ''}" data-action="period" data-key="${x.key}">${esc(x.name)}</button>`).join('')}</div>
+    ${p.key === 'custom' ? `<div class="grid2 period-range"><label>De la<input type="date" id="p-from" value="${esc(p.from)}"></label><label>Până la<input type="date" id="p-to" value="${esc(p.to)}"></label></div>` : ''}`;
+}
+
+// Iconița unui proiect, ca pe ecranul telefonului
+function projectTile(p, amount) {
+  const color = p?.color || (p ? PROJECT_COLORS[Math.abs([...p.id].reduce((a, c) => a + c.charCodeAt(0), 0)) % PROJECT_COLORS.length] : '#78909c');
+  return `<button class="tile" data-action="open-project" data-id="${esc(p?.id || '')}">
+    <span class="tile-icon" style="background:${esc(color)}">${esc(projIcon(p))}</span>
+    <span class="tile-name">${esc(p ? p.name : 'Fără proiect')}</span>
+    <span class="tile-sum">${amount ? money(amount) : '—'}</span></button>`;
+}
+
+function renderSetupCard() {
+  if (state.projectsSetup) return '';
+  const have = new Set(state.projects.map((p) => normalize(p.name)));
+  const sugg = SUGGESTED_PROJECTS.filter((x) => !have.has(normalize(x.name)));
+  return `<section class="card setup-card"><h3>📁 Proiectele tale</h3>
+    <p class="small">Fiecare casă, atelierul și fiecare mașină au propriul proiect, cu totalul lor. Bonurile le încarci direct în proiect, apăsând pe iconiță.</p>
+    ${sugg.map((x, i) => `<label class="check"><input type="checkbox" class="setup-pick" data-i="${i}" checked> ${esc(x.icon)} ${esc(x.name)}</label>`).join('')}
+    ${state.projects.length ? `<p class="small muted">Există deja: ${state.projects.map((p) => esc(projIcon(p) + ' ' + p.name)).join(', ')}. Le poți redenumi sau șterge din proiect → ✏️.</p>` : ''}
+    <div class="row-flex wrap"><button class="primary" data-action="setup-projects">Creează proiectele</button><button data-action="skip-setup">Nu acum</button></div>
+  </section>`;
+}
+
 function renderHome() {
   const now = todayISO();
-  const month = now.slice(0, 7);
-  const monthExp = state.expenses.filter((e) => (e.date || '').startsWith(month));
-  const monthTotal = monthExp.reduce((s, e) => s + (+e.total || 0), 0);
-  const byCat = {};
-  for (const e of monthExp) { const n = catById(e.categoryId)?.name || 'Fără categorie'; byCat[n] = (byCat[n] || 0) + (+e.total || 0); }
+  const range = periodRange(state.period);
+  const { total, byProject } = projectTotals(state.expenses, range);
   const upcoming = state.reminders.filter((r) => !r.done && RC.daysUntil(r.dueDate, new Date()) <= 45)
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   const todayLists = state.tasks.filter((t) => t.date && t.date <= now && t.items.some((i) => !i.done));
   const toCheck = state.expenses.filter((e) => expenseFlags(e).length).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  const projectTotals = state.projects.map((p) => ({ p, total: state.expenses.filter((e) => e.projectId === p.id).reduce((s, e) => s + (+e.total || 0), 0) }));
+  const none = byProject[''] || 0;
 
   return `
-  <section class="card ask">
-    <form id="ask-form">
-      <input name="q" type="search" placeholder="Întreabă: cât m-a costat casa?" value="${esc(state.ask)}" autocomplete="off">
-      <button class="primary">Caută</button>
-    </form>
-    <div class="chips">
-      ${['Cât m-a costat casa?', 'Cât am dat pe benzină anul acesta?', 'Băuturi luna asta', 'Scule', 'Unt', 'Cheltuieli mașină luna asta', 'Consum luna trecută']
-        .map((c) => `<button class="chip" data-action="ask" data-q="${esc(c)}">${esc(c)}</button>`).join('')}
-    </div>
+  <section class="card period-card">
+    ${periodChips()}
+    <div class="big-total">${money(total)}</div>
+    <div class="muted small">cheltuieli · ${esc(range.label)}</div>
   </section>
-  ${renderAskResult()}
+  <section class="proj-grid">
+    ${state.projects.map((p) => projectTile(p, byProject[p.id] || 0)).join('')}
+    ${none ? projectTile(null, none) : ''}
+    <button class="tile add" data-action="new-project"><span class="tile-icon">＋</span><span class="tile-name">Proiect nou</span><span class="tile-sum"></span></button>
+  </section>
+  ${renderSetupCard()}
   <section class="quick">
     <button class="big-btn" data-action="photo-receipt">📷<span>Fotografiază bon</span></button>
     <button class="big-btn" data-action="photo-odometer">🚗<span>Poză kilometraj</span></button>
@@ -266,21 +337,86 @@ function renderHome() {
     ${toCheck.length > 4 ? '<button class="link" data-action="show-to-check">Vezi toate →</button>' : ''}</section>` : ''}
   ${upcoming.length ? `<section class="card"><h3>⏰ Expirări apropiate</h3><ul class="list">${upcoming.map(reminderRow).join('')}</ul></section>` : ''}
   ${todayLists.length ? `<section class="card"><h3>🛒 De făcut azi</h3>${todayLists.map(listCard).join('')}</section>` : ''}
-  <section class="card">
-    <h3>Luna aceasta: ${money(monthTotal)}</h3>
-    ${breakdown(byCat, monthTotal) || '<p class="muted">Niciun bon luna aceasta. Apasă „Fotografiază bon”.</p>'}
+  <section class="card ask">
+    <form id="ask-form">
+      <input name="q" type="search" placeholder="Întreabă: cât m-a costat casa?" value="${esc(state.ask)}" autocomplete="off">
+      <button class="primary">Caută</button>
+    </form>
+    <div class="chips">
+      ${['Cât m-a costat casa?', 'Cât am dat pe benzină anul acesta?', 'Băuturi luna asta', 'Scule', 'Unt', 'Cheltuieli mașină luna asta', 'Consum luna trecută']
+        .map((c) => `<button class="chip" data-action="ask" data-q="${esc(c)}">${esc(c)}</button>`).join('')}
+    </div>
   </section>
-  ${projectTotals.length ? `<section class="card"><h3>📁 Proiecte</h3><table class="breakdown"><tbody>
-    ${projectTotals.map(({ p, total }) => `<tr data-action="ask" data-q="${esc(p.name)}" class="click"><td>${esc(p.name)}</td><td class="num">${money(total)}</td></tr>`).join('')}
-  </tbody></table></section>` : ''}`;
+  ${renderAskResult()}`;
+}
+
+// Bare pe categorii (cu subcategorii) pentru ecranul proiectului
+function catBars(nodes, total, drill) {
+  if (!nodes.length) return '<p class="muted">Niciun bon în perioada aleasă.</p>';
+  return `<ul class="cat-bars">${nodes.map((n) => {
+    const c = n.cat;
+    const pct = total ? Math.max(2, Math.round(Math.abs(n.total) / Math.abs(total) * 100)) : 0;
+    return `<li ${drill && c ? `class="click" data-action="proj-cat" data-id="${esc(c.id)}"` : ''}>
+      <div class="cb-head"><span>${esc(c?.icon || '•')} ${esc(c?.name || 'Fără categorie')}${n.children?.length ? ` <span class="muted small">(${n.children.length === 1 ? '1 subcategorie' : `${n.children.length} subcategorii`})</span>` : ''}</span><b>${money(n.total)}</b></div>
+      <div class="cb-bar"><span style="width:${pct}%;background:${esc(c?.color || '#9e9e9e')}"></span></div>
+      <div class="muted small">${bonuri(n.count)}${drill && c ? ' · detalii ›' : ''}</div></li>`;
+  }).join('')}</ul>`;
+}
+
+function renderProject() {
+  const pid = state.projectId || '';
+  const p = pid ? projById(pid) : null;
+  if (pid && !p) { state.view = 'home'; return renderHome(); }
+  const range = periodRange(state.period);
+  let rows = projectExpenses(state.expenses, pid, range);
+  const total = rows.reduce((a, r) => a + r.share, 0);
+  const tree = categoryBreakdown(rows, state.categories);
+  const sel = state.projCat ? catById(state.projCat) : null;
+  let body;
+  if (sel) {
+    const node = tree.find((n) => n.cat?.id === sel.id);
+    rows = rows.filter(({ e }) => e.categoryId === sel.id || catById(e.categoryId)?.parentId === sel.id);
+    body = `<section class="card"><button class="link" data-action="proj-cat" data-id="">‹ Toate categoriile</button>
+      <h3>${esc(sel.icon || '')} ${esc(sel.name)} · ${money(node?.total || 0)}</h3>
+      ${node?.children.length ? catBars(node.children, node.total, false) : ''}</section>`;
+  } else {
+    body = `<section class="card"><h3>Pe categorii</h3>${catBars(tree, total, true)}</section>`;
+  }
+  const allTime = p?.budget ? projectExpenses(state.expenses, pid, { from: '', to: '' }).reduce((a, r) => a + r.share, 0) : 0;
+  const shown = rows.slice(0, state.listLimit);
+  return `
+  <section class="card proj-head">
+    <div class="row-flex">
+      <button class="icon-btn" data-action="go-home" aria-label="Înapoi">‹</button>
+      <span class="tile-icon sm">${esc(projIcon(p))}</span>
+      <h2 class="grow">${esc(p ? p.name : 'Fără proiect')}</h2>
+      ${p ? `<button class="icon-btn" data-action="edit-project" data-id="${esc(p.id)}" aria-label="Editează proiectul">✏️</button>` : ''}
+    </div>
+    ${periodChips()}
+    <div class="big-total">${money(total)}</div>
+    <div class="muted small">${esc(range.label)} · ${bonuri(rows.length)}</div>
+    ${p?.budget ? `<div class="budget"><div class="cb-bar"><span style="width:${Math.min(100, Math.round(allTime / p.budget * 100))}%;background:${allTime > p.budget ? '#c62828' : '#2e7d32'}"></span></div>
+      <div class="small muted">Buget: ${money(allTime)} din ${money(p.budget)} (total, toată perioada)</div></div>` : ''}
+  </section>
+  <section class="quick">
+    <button class="big-btn" data-action="photo-receipt" data-project="${esc(pid)}">📷<span>Bon aici</span></button>
+    <button class="big-btn" data-action="gallery-receipt" data-project="${esc(pid)}">🖼️<span>Din galerie</span></button>
+    <button class="big-btn" data-action="new-expense" data-project="${esc(pid)}">✍️<span>Manual</span></button>
+  </section>
+  ${p?.vehicleId ? `<button class="card wide-link" data-action="open-car" data-id="${esc(p.vehicleId)}">🚗 Consum, kilometri și expirări →</button>` : ''}
+  ${body}
+  <section class="card"><h3>Bonuri</h3>
+    <ul class="list">${shown.map(({ e, share }) => expenseRow(e, { share })).join('') || '<li class="muted pad">Niciun bon în perioada aleasă.</li>'}</ul>
+    ${rows.length > state.listLimit ? `<button class="link center-btn" data-action="more-receipts">Arată încă ${Math.min(100, rows.length - state.listLimit)}</button>` : ''}
+  </section>`;
 }
 
 function filteredExpenses() {
   const f = state.filter;
   const q = f.q.toLowerCase();
   return state.expenses.filter((e) =>
-    (!f.cat || e.categoryId === f.cat) &&
-    (!f.proj || e.projectId === f.proj) &&
+    (!f.cat || e.categoryId === f.cat || catById(e.categoryId)?.parentId === f.cat) &&
+    (!f.proj || expenseShares(e).has(f.proj)) &&
     (!f.month || (e.date || '').startsWith(f.month)) &&
     (!f.check || expenseFlags(e).length > 0) &&
     (!q || `${e.store} ${e.notes} ${e.ocrText}`.toLowerCase().includes(q)))
@@ -291,8 +427,7 @@ function modeSwitch() {
   const m = state.receiptsMode;
   return `<div class="seg" role="tablist">
     <button data-action="rmode" data-mode="bills" class="${m === 'bills' ? 'on' : ''}">🧾 Bonuri</button>
-    <button data-action="rmode" data-mode="products" class="${m === 'products' ? 'on' : ''}">📊 Produse</button>
-    <button data-action="rmode" data-mode="inventory" class="${m === 'inventory' ? 'on' : ''}">🧰 Inventar</button></div>`;
+    <button data-action="rmode" data-mode="products" class="${m === 'products' ? 'on' : ''}">📊 Produse</button></div>`;
 }
 
 // Toate produsele de pe bonuri, cu bonul din care provin.
@@ -364,7 +499,6 @@ function renderProducts() {
 
 function renderReceipts() {
   if (state.receiptsMode === 'products') return renderProducts();
-  if (state.receiptsMode === 'inventory') return renderInventory();
   const list = filteredExpenses();
   const total = list.reduce((s, e) => s + (+e.total || 0), 0);
   const f = state.filter;
@@ -377,8 +511,8 @@ function renderReceipts() {
   <section class="card filters">
     <input id="f-q" type="search" placeholder="Caută magazin, notă, text bon…" value="${esc(f.q)}">
     <div class="grid3">
-      <select id="f-cat">${options(state.categories, f.cat, 'Toate categoriile')}</select>
-      <select id="f-proj">${options(state.projects, f.proj, 'Toate proiectele')}</select>
+      <select id="f-cat">${catOptions(f.cat, 'Toate categoriile')}</select>
+      <select id="f-proj">${projOptions(f.proj, 'Toate proiectele')}</select>
       <input id="f-month" type="month" value="${esc(f.month)}">
     </div>
     <div class="total-line">${bonuri(list.length)} · <b>${money(total)}</b></div>
@@ -495,13 +629,13 @@ function renderLists() {
 function renderSettings() {
   const perm = 'Notification' in window ? Notification.permission : 'indisponibil';
   return `
-  <section class="card"><div class="row-flex"><h3 class="grow">Categorii</h3><button data-action="new-category">+ Adaugă</button></div>
-    <ul class="list">${state.categories.map((c) => `<li class="row" data-action="edit-category" data-id="${esc(c.id)}">
-      <span class="dot big" style="background:${esc(c.color)}"></span><div class="grow">${esc(c.name)}</div>
+  <section class="card" id="set-categories"><div class="row-flex"><h3 class="grow">Categorii</h3><button data-action="new-category">+ Adaugă</button></div>
+    <ul class="list">${categoryTree(state.categories).flatMap((p) => [p, ...p.children]).map((c) => `<li class="row ${c.parentId ? 'sub-row' : ''}" data-action="edit-category" data-id="${esc(c.id)}">
+      <span class="dot big" style="background:${esc(c.color)}"></span><div class="grow">${c.parentId ? '↳ ' : ''}${esc(c.icon ? c.icon + ' ' : '')}${esc(c.name)}</div>
       <span class="muted small">${c.isFuel ? 'combustibil' : c.isCar ? 'mașină' : ''}</span></li>`).join('')}</ul></section>
   <section class="card"><div class="row-flex"><h3 class="grow">Proiecte</h3><button data-action="new-project">+ Adaugă</button></div>
-    <p class="muted small">Ex.: „Construcție casă”, „Renovare baie”. Atașezi bonurile la proiect și vezi costul total.</p>
-    <ul class="list">${state.projects.map((p) => `<li class="row" data-action="edit-project" data-id="${esc(p.id)}"><div class="grow">📁 ${esc(p.name)}</div></li>`).join('')}</ul></section>
+    <p class="muted small">Fiecare casă, atelierul și fiecare vehicul au proiectul lor, cu iconiță pe ecranul principal.</p>
+    <ul class="list">${state.projects.map((p) => `<li class="row" data-action="edit-project" data-id="${esc(p.id)}"><div class="grow">${esc(projIcon(p))} ${esc(p.name)} <span class="muted small">${esc(kindOf(p.kind).name)}</span></div></li>`).join('')}</ul></section>
   <section class="card"><div class="row-flex"><h3 class="grow">Mașini</h3><button data-action="new-vehicle">+ Adaugă</button></div>
     <ul class="list">${state.vehicles.map((v) => `<li class="row" data-action="edit-vehicle" data-id="${esc(v.id)}"><div class="grow">🚗 ${esc(v.name)} <span class="muted">${esc(v.plate || '')}</span></div></li>`).join('')}</ul></section>
   <section class="card"><h3>🧰 Inventar</h3>
@@ -518,7 +652,7 @@ function renderSettings() {
     (și în fundal, pe Android, dacă este instalată pe ecranul principal). Pentru siguranță maximă, adaugă expirările și în calendarul telefonului (.ics).</p>
     <div class="row-flex wrap"><button class="primary" data-action="enable-notif">Activează notificările</button>
     <button data-action="test-notif">Test</button><button data-action="ics-all">📆 Export calendar (.ics)</button></div></section>
-  <section class="card"><h3>Export / integrare</h3>
+  <section class="card" id="set-export"><h3>Export / integrare</h3>
     <p class="small muted">CSV-ul se deschide în Excel și poate fi importat în programe de facturare / contabilitate. Backup-ul JSON conține tot, inclusiv pozele.</p>
     <div class="row-flex wrap">
       <button data-action="export-csv">⬇️ CSV cheltuieli</button>
@@ -549,8 +683,8 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     </div>
     <label>Magazin / furnizor<input name="store" value="${esc(exp.store)}"></label>
     <div id="supplier-line" class="supplier small"></div>
-    <label>Categorie<select name="categoryId">${options(state.categories, exp.categoryId, '— alege —')}</select></label>
-    <label>Proiect<select name="projectId">${options(state.projects, exp.projectId)}</select></label>
+    <label>Proiect<select name="projectId">${projOptions(exp.projectId)}</select></label>
+    <label>Categorie<select name="categoryId">${catOptions(exp.categoryId)}</select></label>
     <div id="car-block" class="${cat?.isCar || exp.vehicleId ? '' : 'hidden'}">
       <label>Mașina<select name="vehicleId">${options(state.vehicles, exp.vehicleId)}</select></label>
     </div>
@@ -565,7 +699,9 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
     </fieldset>
     <details id="items-box" ${exp.items?.length || (!isNew && exp.image) ? 'open' : ''}><summary>🧾 Produse (<span id="items-count">0</span>) <span id="items-sum" class="muted small"></span></summary>
       <div id="items-list"></div>
-      <button type="button" id="item-add" class="link">+ Adaugă produs</button>
+      <div id="split-sum" class="small"></div>
+      <div class="row-btns"><button type="button" id="item-add" class="link">+ Adaugă produs</button>
+      ${state.projects.length > 1 ? '<button type="button" id="item-split" class="link">✂️ Împarte bonul pe proiecte</button>' : ''}</div>
     </details>
     <label>Notițe<textarea name="notes" rows="2">${esc(exp.notes)}</textarea></label>
     <details><summary>Text citit de pe bon</summary><textarea name="ocrText" rows="6">${esc(exp.ocrText)}</textarea></details>
@@ -593,8 +729,21 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       $('#car-block', root).classList.toggle('hidden', !(c?.isCar || form.vehicleId.value));
       $('#fuel-block', root).classList.toggle('hidden', !(c?.isFuel || form.liters.value));
       if (c?.isCar && !form.vehicleId.value && state.vehicles.length) form.vehicleId.value = state.vehicleId || state.vehicles[0].id;
+      if (c?.isCar && !form.projectId.value && !touched.has('projectId')) form.projectId.value = vehicleProject(form.vehicleId.value)?.id || '';
     };
     form.categoryId.addEventListener('change', syncBlocks);
+    // mașina și proiectul ei merg împreună
+    form.vehicleId.addEventListener('change', () => {
+      const vp = vehicleProject(form.vehicleId.value);
+      const cur = projById(form.projectId.value);
+      if (vp && (!cur || cur.kind === 'vehicle')) form.projectId.value = vp.id;
+    });
+    form.projectId.addEventListener('change', () => {
+      touched.add('projectId');
+      const p = projById(form.projectId.value);
+      if (p?.vehicleId) { form.vehicleId.value = p.vehicleId; $('#car-block', root).classList.remove('hidden'); }
+      updateItemsSum();
+    });
     const recalc = () => {
       const l = toNum(form.liters.value); const p = toNum(form.ppl.value); const t = toNum(form.total.value);
       if (l && t && !touched.has('ppl')) form.ppl.value = (t / l).toFixed(2);
@@ -654,6 +803,11 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       const sgr = exp.items.filter((i) => i.sub === 'sgr').reduce((a, i) => a + (+i.amount || 0), 0);
       $('#items-sum', root).textContent = exp.items.length
         ? `· suma ${num(sum)}${t != null ? (Math.abs(Math.abs(sum) - Math.abs(t)) < 0.05 ? ' ✓ = total' : ` ≠ total ${num(t)}`) : ''}${sgr ? ` · ♻️ SGR ${num(sgr)}` : ''}` : '';
+      const sp = $('#split-sum', root);
+      if (sp) {
+        const shares = expenseShares({ total: t || 0, projectId: form.projectId.value, items: exp.items });
+        sp.innerHTML = shares.size > 1 ? '✂️ Împărțit: ' + [...shares].map(([pid, a]) => `${esc(projIcon(projById(pid)))} ${esc(projById(pid)?.name || 'fără proiect')} <b>${esc(money(a))}</b>`).join(' · ') : '';
+      }
       renderChecks();
     };
     // ---- „De verificat”: ce ar putea fi citit greșit, arătat direct în formular
@@ -708,8 +862,13 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       } else if (fix === 'store') goTo(form.store);
       else goTo(form[fix]);
     });
+    // „Împarte bonul”: fiecare produs poate merge la alt proiect (ex. o parte pentru Casa Varlam)
+    let split = exp.items.some((i) => i.projectId && i.projectId !== exp.projectId);
+    const projSelect = (i) => (split ? `<select class="it-proj" aria-label="Proiectul produsului">${projOptions(i.projectId || '', '↳ ca bonul')}</select>` : '');
+    $('#item-split', root)?.addEventListener('click', () => { split = !split; if (!split) exp.items.forEach((i) => { i.projectId = ''; }); renderItems(); });
     const renderItems = () => {
       $('#items-list', root).innerHTML = exp.items.map((i) => `<div class="item-row" data-id="${esc(i.id)}">
+        ${projSelect(i)}
         <input class="it-name" value="${esc(i.name)}" aria-label="Produs">
         <input class="it-amount" inputmode="decimal" value="${esc(i.amount ?? '')}" aria-label="Sumă">
         <select class="it-sub" aria-label="Subcategorie">${subOptions(i.sub)}</select>
@@ -746,6 +905,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       const it = itemOf(ev.target);
       if (!it) return;
       if (ev.target.classList.contains('it-sub')) { it.sub = ev.target.value; it.manualSub = true; }
+      if (ev.target.classList.contains('it-proj')) { it.projectId = ev.target.value; itemsTouched = true; updateItemsSum(); }
       if (ev.target.classList.contains('it-name') && !it.manualSub) {
         it.sub = classifyItem(it.name, state.itemRules);
         ev.target.closest('.item-row').querySelector('.it-sub').value = it.sub;
@@ -841,6 +1001,11 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       const set = (name, val) => { if (val != null && val !== '' && !touched.has(name)) form[name].value = val; };
       set('date', r.date);
       set('store', r.store);
+      // proiectul obișnuit al magazinului (dacă bonul nu a fost pornit dintr-un proiect)
+      if (!exp.fromProject && !touched.has('projectId')) {
+        const pid = state.storeProjects[storeKey(form.store.value)];
+        if (pid && projById(pid)) form.projectId.value = pid;
+      }
       exp.cif = r.cif || exp.cif || '';
       exp.cifValid = !!r.cifValid;
       exp.cifRepaired = !!r.cifRepaired;
@@ -968,6 +1133,7 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       await learnSubcats(exp.items.filter((i) => i.manualSub));
       await learnNames(data.items);
       if (touched.has('store')) await learnStore(data);
+      await learnStoreProject(data);
       await finishPhotos(data, originals, !!form.hq?.checked);
       if (!(await save('expenses', data))) return;
       closeModal();
@@ -1064,7 +1230,7 @@ function renderInventory() {
   const groups = {};
   for (const x of list) (groups[x.location || ''] ||= []).push(x);
   const subsNames = state.invSubs.map((k) => subcatByKey(k).name).join(', ');
-  return `${modeSwitch()}
+  return `<h2 class="view-title">🧰 Inventar</h2>
   <section class="card">
     <div class="kpis">
       <div><b>${count}</b><span>bucăți deținute</span></div>
@@ -1235,6 +1401,14 @@ async function setAnafStatus(ok) {
   await db.put('meta', { id: 'anafStatus', ...state.anafStatus });
 }
 
+// Ține minte la ce proiect merg de obicei bonurile unui magazin.
+async function learnStoreProject(e) {
+  const key = storeKey(e.store);
+  if (!key || !e.projectId || state.storeProjects[key] === e.projectId) return;
+  state.storeProjects = sanitizeStoreProjects({ ...state.storeProjects, [key]: e.projectId });
+  await db.put('meta', { id: 'storeProjects', data: state.storeProjects });
+}
+
 // Ține minte numele corectate: data viitoare produsul cu același cod de bare
 // (sau aceleași cuvinte citite) apare direct cu numele bun.
 async function learnNames(items) {
@@ -1312,13 +1486,21 @@ function newExpense(extra = {}) {
   return { id: db.uid(), date: todayISO(), total: null, store: '', categoryId: '', projectId: projById(lastProj) ? lastProj : '', vehicleId: '', notes: '', ocrText: '', image: null, ...extra };
 }
 
-async function photoReceipt(capture = true) {
+async function photoReceipt(capture = true, extra = {}) {
   const f = await pickFile({ capture });
   if (!f) return;
   const image = await compressImage(f);
   if (!image) return;
-  openExpense(newExpense({ image }), { runOcr: true, ocrSource: f });
+  openExpense(newExpense({ image, ...extra }), { runOcr: true, ocrSource: f });
 }
+
+// Bon pornit din ecranul unui proiect: intră direct în proiect (și la mașina lui).
+function projectExtra(el) {
+  if (el?.dataset?.project === undefined) return {};
+  const p = projById(el.dataset.project);
+  return { projectId: p?.id || '', vehicleId: p?.vehicleId || '', fromProject: true };
+}
+function savePeriod() { try { localStorage.setItem('period', JSON.stringify(state.period)); } catch { /* ignoră */ } }
 
 // ---------- kilometraj ----------
 function openOdometer(o, { runOcr = false } = {}) {
@@ -1496,6 +1678,9 @@ function openCategory(c) {
   openModal(isNew ? 'Categorie nouă' : 'Editează categoria', `
   <form id="cat-form" class="form">
     <label>Nume<input name="name" value="${esc(c.name)}" required></label>
+    <label>Face parte din (subcategorie)<select name="parentId" ${state.categories.some((x) => x.parentId === c.id) ? 'disabled' : ''}>
+      <option value="">— categorie principală —</option>${state.categories.filter((x) => !x.parentId && x.id !== c.id).map((x) => `<option value="${esc(x.id)}" ${x.id === c.parentId ? 'selected' : ''}>${esc(x.icon || '')} ${esc(x.name)}</option>`).join('')}</select></label>
+    <label>Iconiță (emoji, opțional)<input name="icon" value="${esc(c.icon || '')}" maxlength="8" placeholder="ex.: 🧸"></label>
     <label>Culoare<input name="color" type="color" value="${esc(c.color || '#607d8b')}"></label>
     <label class="check"><input type="checkbox" name="isCar" ${c.isCar ? 'checked' : ''}> Ține de mașină</label>
     <label class="check"><input type="checkbox" name="isFuel" ${c.isFuel ? 'checked' : ''}> Este combustibil (cere litri / km)</label>
@@ -1510,7 +1695,8 @@ function openCategory(c) {
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const isFuel = form.isFuel.checked;
-      if (!(await save('categories', { ...c, name: form.name.value.trim(), color: form.color.value, isFuel, isCar: form.isCar.checked || isFuel, order: c.order ?? state.categories.length }))) return;
+      if (!(await save('categories', { ...c, name: form.name.value.trim(), color: form.color.value, isFuel, isCar: form.isCar.checked || isFuel, order: c.order ?? state.categories.length,
+        parentId: form.parentId.disabled ? '' : form.parentId.value, icon: form.icon.value.trim() }))) return;
       closeModal();
     });
   });
@@ -1518,20 +1704,49 @@ function openCategory(c) {
 
 function openProject(p) {
   const isNew = !state.projects.some((x) => x.id === p.id);
-  const total = state.expenses.filter((e) => e.projectId === p.id).reduce((s, e) => s + (+e.total || 0), 0);
+  const total = projectExpenses(state.expenses, p.id, { from: '', to: '' }).reduce((a, r) => a + r.share, 0);
+  const kind = p.kind || 'house';
+  const icon = p.icon || kindOf(kind).icon;
   openModal(isNew ? 'Proiect nou' : 'Editează proiectul', `
   <form id="proj-form" class="form">
-    ${isNew ? '' : `<p>Total cheltuit: <b>${money(total)}</b></p>`}
-    <label>Nume<input name="name" value="${esc(p.name)}" required placeholder="ex.: Construcție casă"></label>
+    ${isNew ? '' : `<p>Total cheltuit (toată perioada): <b>${money(total)}</b></p>`}
+    <label>Nume<input name="name" value="${esc(p.name)}" required placeholder="ex.: Casa București"></label>
+    <label>Tip<select name="kind">${PROJECT_KINDS.map((k) => `<option value="${k.key}" ${k.key === kind ? 'selected' : ''}>${k.icon} ${esc(k.name)}</option>`).join('')}</select></label>
+    <div class="icon-pick" role="radiogroup" aria-label="Iconiță">${PROJECT_ICONS.map((i) => `<button type="button" class="ip ${i === icon ? 'on' : ''}" data-icon="${i}" aria-label="${i}">${i}</button>`).join('')}</div>
+    <div class="color-pick" role="radiogroup" aria-label="Culoare">${PROJECT_COLORS.map((c) => `<button type="button" class="cp ${c === p.color ? 'on' : ''}" data-color="${c}" style="background:${c}" aria-label="culoare"></button>`).join('')}</div>
+    ${state.vehicles.length ? `<label>Vehiculul proiectului (opțional)<select name="vehicleId">${options(state.vehicles, p.vehicleId || '', '— niciunul —')}</select></label>` : ''}
     <label>Buget (opțional)<input name="budget" inputmode="decimal" value="${esc(p.budget ?? '')}"></label>
     <label>Notițe<textarea name="notes" rows="2">${esc(p.notes || '')}</textarea></label>
     <div class="actions">${isNew ? '' : '<button type="button" class="danger" id="proj-del">Șterge</button>'}<button class="primary">Salvează</button></div>
   </form>`, (root) => {
     const form = $('#proj-form', root);
-    $('#proj-del', root)?.addEventListener('click', async () => { if (await remove('projects', p.id, 'proiectul')) closeModal(); });
+    let pickedIcon = icon;
+    let pickedColor = p.color || '';
+    $('.icon-pick', root).addEventListener('click', (ev) => {
+      const b = ev.target.closest('.ip'); if (!b) return;
+      pickedIcon = b.dataset.icon;
+      root.querySelectorAll('.ip').forEach((x) => x.classList.toggle('on', x === b));
+    });
+    $('.color-pick', root).addEventListener('click', (ev) => {
+      const b = ev.target.closest('.cp'); if (!b) return;
+      pickedColor = b.dataset.color;
+      root.querySelectorAll('.cp').forEach((x) => x.classList.toggle('on', x === b));
+    });
+    form.kind.addEventListener('change', () => {
+      pickedIcon = kindOf(form.kind.value).icon;
+      root.querySelectorAll('.ip').forEach((x) => x.classList.toggle('on', x.dataset.icon === pickedIcon));
+    });
+    $('#proj-del', root)?.addEventListener('click', async () => {
+      const used = state.expenses.filter((e) => expenseShares(e).has(p.id)).length;
+      if (used && !confirm(`${bonuri(used)} sunt în acest proiect. Bonurile rămân, dar fără proiect. Continui?`)) return;
+      if (await remove('projects', p.id, 'proiectul')) { closeModal(); if (state.projectId === p.id) { state.view = 'home'; render(); } }
+    });
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      if (!(await save('projects', { ...p, name: form.name.value.trim(), budget: toNum(form.budget.value), notes: form.notes.value.trim() }))) return;
+      const data = { ...p, name: form.name.value.trim(), kind: form.kind.value, icon: pickedIcon, color: pickedColor,
+        vehicleId: form.vehicleId ? form.vehicleId.value : (p.vehicleId || ''), budget: toNum(form.budget.value), notes: form.notes.value.trim(),
+        order: p.order ?? state.projects.length };
+      if (!(await save('projects', data))) return;
       closeModal();
     });
   });
@@ -1554,6 +1769,8 @@ function openVehicle(v) {
       ev.preventDefault();
       state.vehicleId = v.id;
       if (!(await save('vehicles', { ...v, name: form.name.value.trim(), plate: form.plate.value.trim().toUpperCase(), fuelType: form.fuelType.value.trim(), vin: form.vin.value.trim() }))) return;
+      // fiecare vehicul are proiectul lui (cu iconița pe ecranul principal)
+      if (!vehicleProject(v.id)) await save('projects', { id: db.uid(), name: form.name.value.trim(), kind: 'vehicle', icon: '🚗', vehicleId: v.id, order: state.projects.length });
       closeModal();
     });
   });
@@ -1707,15 +1924,33 @@ async function wipe() {
   for (const s of db.STORES) await db.clear(s);
   await seed();
   await loadAll();
+  await migrate().catch(() => {});
   render();
   toast('Date șterse');
 }
 
 // ---------- evenimente ----------
 const actions = {
-  'photo-receipt': () => photoReceipt(true),
-  'gallery-receipt': () => photoReceipt(false),
-  'new-expense': () => openExpense(newExpense()),
+  'photo-receipt': (el) => photoReceipt(true, projectExtra(el)),
+  'gallery-receipt': (el) => photoReceipt(false, projectExtra(el)),
+  'new-expense': (el) => openExpense(newExpense(projectExtra(el))),
+  period: (el) => { state.period = { ...state.period, key: el.dataset.key }; savePeriod(); render(); },
+  'open-project': (el) => { state.view = 'project'; state.projectId = el.dataset.id || ''; state.projCat = ''; state.listLimit = 100; render(); window.scrollTo(0, 0); },
+  'proj-cat': (el) => { state.projCat = el.dataset.id || ''; state.listLimit = 100; render(); },
+  'go-home': () => { state.view = 'home'; render(); window.scrollTo(0, 0); },
+  'open-car': (el) => { state.vehicleId = el.dataset.id; state.view = 'car'; render(); window.scrollTo(0, 0); },
+  'setup-projects': async () => {
+    const have = new Set(state.projects.map((p) => normalize(p.name)));
+    const sugg = SUGGESTED_PROJECTS.filter((x) => !have.has(normalize(x.name)));
+    const picked = [...document.querySelectorAll('.setup-pick')].filter((c) => c.checked).map((c) => sugg[+c.dataset.i]).filter(Boolean);
+    let order = state.projects.length;
+    for (const x of picked) { const c = sanitize('projects', { id: db.uid(), ...x, order: order++ }); if (c) await db.put('projects', c); }
+    await db.put('meta', { id: 'projectsSetup', done: true });
+    await loadAll();
+    render();
+    toast(picked.length ? `✔ ${picked.length} proiecte create` : 'Gata');
+  },
+  'skip-setup': async () => { await db.put('meta', { id: 'projectsSetup', done: true }); state.projectsSetup = true; render(); },
   'edit-expense': (el) => openExpense({ ...state.expenses.find((e) => e.id === el.dataset.id) }),
   'new-fuel': async () => {
     if (!(await needVehicle())) return;
@@ -1787,9 +2022,59 @@ function doAsk() {
   render();
 }
 
+// ---------- meniul de jos: 5 butoane + „Mai mult” (se apasă sau se trage în sus) ----------
+const sheet = $('#more-sheet');
+const backdrop = $('#sheet-backdrop');
+function setSheet(open) {
+  sheet.style.transform = '';
+  sheet.classList.toggle('open', open);
+  sheet.setAttribute('aria-hidden', String(!open));
+  backdrop.hidden = !open;
+}
+function goView(view) { state.view = view; state.listLimit = 100; setSheet(false); render(); window.scrollTo(0, 0); }
+const SHEET_GO = {
+  lists: () => goView('lists'),
+  products: () => { state.receiptsMode = 'products'; goView('receipts'); },
+  'new-project': () => { setSheet(false); openProject({ id: db.uid(), name: '' }); },
+  ask: () => { goView('home'); $('#ask-form input')?.scrollIntoView({ block: 'center' }); $('#ask-form input')?.focus(); },
+  check: () => { setSheet(false); actions['show-to-check'](); },
+  settings: () => goView('settings'),
+  export: () => { goView('settings'); $('#set-export')?.scrollIntoView({ block: 'start' }); },
+  categories: () => { goView('settings'); $('#set-categories')?.scrollIntoView({ block: 'start' }); },
+};
+sheet.addEventListener('click', (ev) => { const b = ev.target.closest('[data-go]'); if (b) SHEET_GO[b.dataset.go]?.(); });
+backdrop.addEventListener('click', () => setSheet(false));
+// tragerea: de pe bara de jos în sus deschide, de pe foaie în jos închide
+(() => {
+  let startY = null; let moved = 0; let from = null;
+  const down = (ev, where) => { startY = ev.clientY; moved = 0; from = where; };
+  const move = (ev) => {
+    if (startY === null) return;
+    moved = ev.clientY - startY;
+    const open = sheet.classList.contains('open');
+    if (from === 'nav' && !open && moved < -8) { sheet.classList.add('dragging'); sheet.style.transform = `translateY(calc(100% + ${moved}px))`; }
+    if (from === 'sheet' && open && moved > 8) { sheet.classList.add('dragging'); sheet.style.transform = `translateY(${moved}px)`; }
+  };
+  const up = () => {
+    if (startY === null) return;
+    sheet.classList.remove('dragging');
+    if (from === 'nav' && moved < -40) { setSheet(true); suppressClick = true; } else if (from === 'sheet' && moved > 60) setSheet(false);
+    else sheet.style.transform = '';
+    startY = null;
+  };
+  $('#tabs').addEventListener('pointerdown', (ev) => down(ev, 'nav'));
+  sheet.querySelector('.sheet-handle').addEventListener('pointerdown', (ev) => down(ev, 'sheet'));
+  window.addEventListener('pointermove', move, { passive: true });
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+})();
+let suppressClick = false;
+
 document.addEventListener('click', (ev) => {
+  if (suppressClick) { suppressClick = false; if (ev.target.closest('nav.tabs')) return; }
+  if (ev.target.closest('nav.tabs [data-more]')) { setSheet(!sheet.classList.contains('open')); return; }
   const nav = ev.target.closest('nav.tabs button');
-  if (nav) { state.view = nav.dataset.view; state.listLimit = 100; render(); window.scrollTo(0, 0); return; }
+  if (nav) { if (nav.dataset.view === 'receipts' && state.view !== 'receipts') state.receiptsMode = 'bills'; goView(nav.dataset.view); return; }
   const el = ev.target.closest('[data-action]');
   if (!el || !actions[el.dataset.action]) return;
   if (el.type === 'checkbox') { actions[el.dataset.action](el); return; }
@@ -1825,6 +2110,7 @@ document.addEventListener('change', (ev) => {
   else if (id === 'f-proj') state.filter.proj = ev.target.value;
   else if (id === 'f-month') state.filter.month = ev.target.value;
   else if (id === 'f-check') state.filter.check = ev.target.checked;
+  else if (id === 'p-from' || id === 'p-to') { state.period = { ...state.period, [id === 'p-from' ? 'from' : 'to']: ev.target.value }; savePeriod(); }
   else if (id === 'p-month') state.prodFilter.month = ev.target.value;
   else if (id === 'p-sub') state.prodFilter.sub = ev.target.value;
   else if (id === 'i-status') state.invFilter.status = ev.target.value;
@@ -1856,8 +2142,10 @@ async function start() {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
+  try { const p = JSON.parse(localStorage.getItem('period') || 'null'); if (p?.key) state.period = { key: String(p.key), from: String(p.from || ''), to: String(p.to || '') }; } catch { /* ignoră */ }
   await seed();
   await loadAll();
+  await migrate().catch(() => {});
   render();
   checkReminders();
   setInterval(checkReminders, 3600 * 1000);

@@ -405,9 +405,15 @@ export function parseQuery(text, today = new Date()) {
 
 function expenseStems(e, ctx) {
   const cat = ctx.categories.find((c) => c.id === e.categoryId);
+  const parent = cat?.parentId && ctx.categories.find((c) => c.id === cat.parentId); // „copii” găsește și „Haine”
   const proj = ctx.projects.find((p) => p.id === e.projectId);
   const veh = ctx.vehicles.find((v) => v.id === e.vehicleId);
-  const text = [cat?.name, proj?.name, veh?.name, veh?.plate, e.store, e.notes].filter(Boolean).join(' ');
+  // după ce categoriile au pierdut prefixul „Casă –”/„Mașină –”, întrebările „casa” / „mașina” le găsesc tot
+  const alias = [
+    /^house_/.test(cat?.key || '') || /^house_/.test(parent?.key || '') || proj?.kind === 'house' ? 'casa' : '',
+    cat?.isCar || e.vehicleId || proj?.kind === 'vehicle' ? 'masina' : '',
+  ];
+  const text = [cat?.name, parent?.name, proj?.name, veh?.name, veh?.plate, e.store, e.notes, ...alias].filter(Boolean).join(' ');
   return normalize(text).split(/[^a-z0-9]+/).filter((w) => w.length >= 3).map(stem);
 }
 
