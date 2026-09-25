@@ -23,7 +23,7 @@ const DEFAULT_CATEGORIES = [
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
 // Afișată în Setări: arată dacă telefonul a luat ultima actualizare.
-const APP_VERSION = '2026.09.25-3';
+const APP_VERSION = '2026.09.25-4';
 const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
 
@@ -812,6 +812,11 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       if (!itemsTouched) {
         exp.items = itemsFromText(text, r.isReturn);
         if (exp.items.length) $('#items-box', root).open = true;
+      }
+      // linia TOTAL ilizibilă: suma produselor e o estimare mai bună decât cea mai mare sumă de pe bon
+      if (r.totalSource === 'estimat' && exp.items.length >= 2 && !touched.has('total')) {
+        const sum = exp.items.reduce((acc, i) => acc + (+i.amount || 0), 0);
+        if (sum) { form.total.value = sum.toFixed(2); r.total = sum; }
       }
       syncReturn(true);
       if (r.suggestedCategoryKey && !touched.has('categoryId')) {

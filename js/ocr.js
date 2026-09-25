@@ -90,6 +90,26 @@ async function pickOrientation(worker, img, onProgress) {
   return best;
 }
 
+// Îndreaptă o poză strâmbă cu câteva grade (fundal alb în colțuri).
+function tiltImage(rgba, width, height, deg) {
+  const src = document.createElement('canvas');
+  src.width = width;
+  src.height = height;
+  src.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
+  const out = document.createElement('canvas');
+  out.width = width;
+  out.height = height;
+  const ctx = out.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.translate(width / 2, height / 2);
+  ctx.rotate(-deg * Math.PI / 180);
+  ctx.drawImage(src, -width / 2, -height / 2);
+  const { data } = ctx.getImageData(0, 0, width, height);
+  src.width = src.height = out.width = out.height = 1;
+  return data;
+}
+
 // Cât de bună e o citire: încrederea OCR, dar și câte cuvinte / sume a găsit
 // (o citire aproape goală poate avea încredere mare).
 function readScore(d) {
@@ -121,12 +141,21 @@ export async function recognize(blob, { digits = false, onProgress } = {}) {
   if (img && data.confidence < 70) {
     try {
       onProgress?.('recitesc mai atent', 0);
-      const soft = binarize(img.full, img.W, img.H, { windowFrac: 1 / 12, t: 0.08 });
-      // pe hârtia ștearsă și orientarea poate fi ghicită greșit: încercăm și poza nerotită
-      for (const d of deg ? [deg, 0] : [0]) {
-        const r = rotate(soft, img.W, img.H, d);
-        const next = (await worker.recognize(await toPng(r.data, r.width, r.height))).data;
+      // pe hârtia ștearsă și orientarea poate fi ghicită greșit: încercăm și poza nerotită;
+      // bonul e adesea puțin strâmb sau îndoit, deci încercăm și îndreptat cu ±3° (decupat pe hârtie)
+      const tries = [[deg, 3, true], [deg, -3, true], [deg, 0, false]];
+      if (deg) tries.push([0, 0, false]);
+      for (const [d, tilt, cut] of tries) {
+        if (!cut && data.confidence >= 60) break; // poza întreagă doar dacă nici îndreptat nu merge
+        const r = rotate(img.full, img.W, img.H, d);
+        let px = tilt ? tiltImage(r.data, r.width, r.height, tilt) : r.data;
+        let w = r.width; let h = r.height;
+        const box = cut ? findPaper(px, w, h) : null;
+        if (box) { px = crop(px, w, box); w = box.w; h = box.h; }
+        const soft = binarize(px, w, h, { windowFrac: 1 / 12, t: 0.08 });
+        const next = (await worker.recognize(await toPng(soft, w, h))).data;
         if (readScore(next) > readScore(data)) data = next;
+        if (data.confidence >= 70) break;
       }
     } catch { /* rămâne prima citire */ }
   }

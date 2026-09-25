@@ -121,3 +121,29 @@ FRANZELA 2 BUCHTH x 2.50= 5.00 B`;
   assert.equal(classifyItem(items[1].name), 'sgr');
   assert.equal(items[3].name.includes('GOLD'), true);
 });
+
+test('bon Lisse cu „0” tăiat citit 8/9 și rânduri de TVA printre sume', () => {
+  const text = `LISSE MARKET SRL
+CIF: RO29226198
+DATE FIRMA : LISSE MARKET sp O
+SANZELA LIDER PAN 3006 2 BUCHTA X 2.50= 5,09 ,
+HANZELA PUNGA PAINE 5 BUCATA X 9. 10= 8.20 +
+OCA COLA 0.33 NRG G 1 BUCATA X 7.09 700 ;
+ARANTIE SGR STICLA ! BUCATA X 0.50= g 5g -
+0 BULL 0.25 g 1 BUCATA X 7,20= 726 ;,
+-HRANTIE SGR DOZA I BUCATA X 0.50= g 5g :
+"UNGI LISSE 1 BUCATA X 1.0p= 1-00 ©
+"RRLBORD GOLD ORIG. 1003
+1 BUCATA X 32.50= 32.59 ri
+BON ORDINE : 1231346
+RL LE] IE
+53.935
+em A a me a A 7 m 8.28
+TOTAL TVA A - 21% 0.5;`;
+  assert.equal(parseReceipt(text).store, 'Lisse Market');
+  const items = parseItems(text);
+  assert.deepEqual(items.map((i) => i.amount), [5, 0.2, 7, 0.5, 7.2, 0.5, 1, 32.5]);
+  assert.deepEqual(items.map((i) => i.qty), [2, 2, 1, 1, 1, 1, 1, 1]);
+  assert.equal(items[1].unitPrice, 0.1);
+  assert.equal(+items.reduce((a, i) => a + i.amount, 0).toFixed(2), 53.9);
+});

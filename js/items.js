@@ -126,19 +126,57 @@ function unitFrom(s) {
   if (/^\d{3,}$/.test(t)) return +t / 100; // virgulă nevăzută: „250” = 2,50
   return parseAmount(t);
 }
+// Pe multe case de marcat „0” e tăiat (Ø) și OCR îl citește 8, 9 sau 6 („9.10” în loc de 0,10).
+// Căutăm cea mai mică înlocuire de felul acesta după care cantitate × preț = sumă.
+function zeroVariants(n) {
+  const s = n.toFixed(2);
+  const pos = [...s].map((c, i) => ('689'.includes(c) ? i : -1)).filter((i) => i >= 0);
+  const out = [{ v: n, cost: 0 }];
+  for (let a = 0; a < pos.length; a++) {
+    const one = [...s]; one[pos[a]] = '0';
+    out.push({ v: +one.join(''), cost: 1 });
+    for (let b = a + 1; b < pos.length; b++) { const two = [...one]; two[pos[b]] = '0'; out.push({ v: +two.join(''), cost: 2 }); }
+  }
+  return out;
+}
+function zeroFix(unit, amount, qtyRead) {
+  let best = null;
+  for (const u of zeroVariants(unit)) {
+    if (u.v <= 0) continue;
+    for (const a of zeroVariants(amount)) {
+      if (a.v <= 0) continue;
+      const r = a.v / u.v;
+      const q = Math.round(r);
+      if (q < 1 || q > 99 || Math.abs(r - q) > 0.001) continue;
+      // cantitățile mari pe un bon de magazin sunt rare: le cerem o potrivire mai clară
+      const cost = u.cost + a.cost + (qtyRead != null && q !== qtyRead ? 1 : 0) + (q > 10 ? 2 : 0);
+      if (!best || cost < best.cost) best = { qty: q, unit: u.v, amount: a.v, cost };
+    }
+  }
+  return best && best.cost <= 3 ? best : null;
+}
+
 function parseBucata(m) {
   const qtyKnown = /\d/.test(m[2] || '');
   let qty = qtyKnown ? parseAmount(m[2]) : 1;
-  const unit = unitFrom(m[3]);
+  let unit = unitFrom(m[3]);
   if (!Number.isFinite(unit) || unit <= 0) return null;
   const a = (m[4] || '').match(/(-?\d+)[.,]\s?(\d{2})/); // litera de TVA lipită de sumă („5.008” = 5,00 B)
   let amount = a ? parseAmount(a[1] + '.' + a[2]) : NaN;
+  const bare = !a && (m[4] || '').match(/^\s*(\d{3,5})\b/); // „700” = 7,00 (virgulă nevăzută)
+  if (bare) amount = +bare[1] / 100;
   const calc = +(qty * unit).toFixed(2);
   if (!Number.isFinite(amount)) amount = calc;
-  else if (Math.abs(Math.abs(amount) - Math.abs(calc)) > 0.011) {
+  else if (Math.abs(Math.abs(amount) - Math.abs(calc)) > 0.011 && (() => {
+    const z = zeroFix(unit, Math.abs(amount), qtyKnown ? Math.abs(qty) : null);
+    if (z) { qty = Math.sign(amount || 1) * z.qty; unit = z.unit; amount = Math.sign(amount || 1) * z.amount; return true; }
+    return false;
+  })()) { /* reparat prin cifrele 0 citite greșit */ } else if (Math.abs(Math.abs(amount) - Math.abs(calc)) > 0.011) {
     const r = Math.abs(amount) / unit;
-    if (Math.round(r) >= 1 && Math.abs(r - Math.round(r)) < 0.01) qty = Math.sign(amount) * Math.round(r);
-    else amount = calc; // suma e citită greșit; cantitate × preț e mai sigur
+    if (Math.round(r) >= 1 && Math.abs(r - Math.round(r)) < 0.01) {
+      qty = Math.sign(amount) * Math.round(r);
+      amount = +(qty * unit).toFixed(2); // „32.59” lângă 1 × 32,50 = 32,50
+    } else amount = calc; // suma e citită greșit; cantitate × preț e mai sigur
   }
   return { qty, unitPrice: unit, amount };
 }
@@ -253,6 +291,8 @@ function parsePart(text) {
     .filter(Boolean);
   const items = [];
   const eanLines = lines.filter((l) => /\b(?:ean|art)\W*\d{8,14}\b/i.test(l)).length;
+  // bon în care fiecare produs are rândul „BUCATA X”: celelalte rânduri cu sume (TVA, plată) nu sunt produse
+  const bucataOnly = lines.filter((l) => BUCATA.test(l)).length >= 2;
   let pendingName = null;
   let pendingQty = null;
   let pendingEan = '';
@@ -329,6 +369,10 @@ function parsePart(text) {
     const qty = q ? parseAmount(q[1]) : null;
     const unit = q ? parseAmount(q[3]) : null;
 
+    if (bucataOnly) {
+      if (hasName && !tail && !q) pendingName = namePart; // numele pe rândul de deasupra („MARLBORO GOLD”)
+      continue;
+    }
     if (tail && !qtyOnly) {
       let amount = parseAmount(tail[1]);
       if (!Number.isFinite(amount)) continue;
