@@ -23,7 +23,7 @@ const DEFAULT_CATEGORIES = [
   { key: 'other', name: 'Altele', color: '#757575' },
 ];
 // Afișată în Setări: arată dacă telefonul a luat ultima actualizare.
-const APP_VERSION = '2026.09.25-4';
+const APP_VERSION = '2026.09.25-5';
 const DATA_STORES = ['expenses', 'odometer', 'vehicles', 'reminders', 'tasks', 'categories', 'projects', 'inventory'];
 const REMINDER_TYPES = ['RCA', 'ITP', 'CASCO', 'Rovinietă', 'Revizie / schimb ulei', 'Permis / buletin', 'Altul'];
 
@@ -662,10 +662,52 @@ function openExpense(exp, { runOcr = false, ocrSource = null } = {}) {
       if (!box) return;
       const flags = expenseFlags({ ...readExpenseForm(form, exp), reviewed: false, createdAt: exp.createdAt });
       box.classList.toggle('hidden', !flags.length);
-      box.innerHTML = flags.length ? `<strong>⚠️ De verificat</strong><ul>${flags.map((f) => `<li>${esc(f.text)}</li>`).join('')}</ul>
+      const sum = exp.items.reduce((acc, i) => acc + (+i.amount || 0), 0);
+      // lângă fiecare problemă: butonul care o rezolvă sau duce direct la câmpul de corectat
+      const fixes = {
+        'items-sum': `<button type="button" class="fix" data-fix="use-sum">✔ Folosește suma produselor (${Math.abs(sum).toFixed(2).replace('.', ',')})</button> <button type="button" class="fix" data-fix="total">✏️ Scriu eu totalul</button>`,
+        paid: `<button type="button" class="fix" data-fix="use-paid">✔ Folosește suma plătită (${(+exp.paid || 0).toFixed(2).replace('.', ',')})</button> <button type="button" class="fix" data-fix="total">✏️ Scriu eu totalul</button>`,
+        'total-est': '<button type="button" class="fix" data-fix="total">✏️ Verifică totalul</button>',
+        'total-missing': '<button type="button" class="fix" data-fix="total">✏️ Scrie totalul</button>',
+        'items-unknown': '<button type="button" class="fix" data-fix="items">🧾 Arată produsele</button>',
+        cif: '<button type="button" class="fix" data-fix="store">🏢 Verifică firma</button>',
+        'cif-fixed': '<button type="button" class="fix" data-fix="store">🏢 Verifică firma</button>',
+        'date-old': '<button type="button" class="fix" data-fix="date">📅 Corectează data</button>',
+        'no-cat': '<button type="button" class="fix" data-fix="categoryId">📂 Alege categoria</button>',
+      };
+      box.innerHTML = flags.length ? `<strong>⚠️ De verificat</strong><ul>${flags.map((f) => `<li>${esc(f.text)}<div class="fixes">${fixes[f.key] || ''}</div></li>`).join('')}</ul>
         <label class="check"><input type="checkbox" id="exp-reviewed" ${exp.reviewed ? 'checked' : ''}> Am verificat, e în regulă</label>` : '';
     };
     $('#checks', root).addEventListener('change', (ev) => { if (ev.target.id === 'exp-reviewed') exp.reviewed = ev.target.checked; });
+    const goTo = (el) => {
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('flash');
+      setTimeout(() => el.classList.remove('flash'), 1600);
+      el.focus?.({ preventScroll: true });
+    };
+    const setTotal = (v) => {
+      form.total.value = (exp.isReturn || form.isReturn.checked ? -Math.abs(v) : Math.abs(v)).toFixed(2);
+      touched.add('total');
+      exp.totalSource = '';
+      exp.paid = null;
+      form.total.classList.remove('check');
+      updateItemsSum();
+      goTo(form.total);
+      toast('Total actualizat – apasă Salvează');
+    };
+    $('#checks', root).addEventListener('click', (ev) => {
+      const fix = ev.target.closest('[data-fix]')?.dataset.fix;
+      if (!fix) return;
+      if (fix === 'use-sum') setTotal(exp.items.reduce((acc, i) => acc + (+i.amount || 0), 0));
+      else if (fix === 'use-paid') setTotal(exp.paid);
+      else if (fix === 'items') {
+        $('#items-box', root).open = true;
+        const row = [...root.querySelectorAll('.item-row')].find((r) => isUnknownItem(itemOf(r.firstElementChild) || {})) || $('#items-box', root);
+        goTo(row.querySelector?.('.it-name') || row);
+      } else if (fix === 'store') goTo(form.store);
+      else goTo(form[fix]);
+    });
     const renderItems = () => {
       $('#items-list', root).innerHTML = exp.items.map((i) => `<div class="item-row" data-id="${esc(i.id)}">
         <input class="it-name" value="${esc(i.name)}" aria-label="Produs">

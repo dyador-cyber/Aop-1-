@@ -248,3 +248,7 @@ header.top h1 small { font-weight: 400; font-size: .8rem; opacity: .85; }
 .center-btn { display: block; margin: 8px auto 16px; }
 .items-peek { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62vw; }
 .warn-box { background: var(--warn-soft, #fff4d6); border-radius: 8px; padding: 6px 10px; }
+.checks .fixes { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.checks .fixes:empty { display: none; }
+.checks button.fix { font-size: .88em; padding: 6px 10px; min-height: 34px; border-radius: 16px; }
+.flash { outline: 3px solid #f9a825; outline-offset: 2px; transition: outline-color .3s; }
