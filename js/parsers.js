@@ -180,7 +180,7 @@ export function parseReceipt(text, today = new Date(), { storeRules = {} } = {})
     return t;
   };
   // „DATE FIRMA : LISSE MARKET SRL” – cea mai sigură sursă, când există
-  const dateFirma = lines.map((l) => l.match(/date\s*firm[ae]\s*[:.]?\s*(.{3,})$/i)?.[1]).find(Boolean);
+  const dateFirma = lines.map((l) => l.match(/(?:\b[a-z]{0,2}te\s*)?\bfirm[ae]\s*[:.]\s*(.{3,})$/i)?.[1]).find(Boolean);
   const storeLine = (dateFirma && tidy(dateFirma))
     || head.map(tidy).find((l) => LEGAL_FORM.test(l) && !isNoise(l))
     || head.map(tidy).find((l) => STORE_HINTS.some((h) => h.words.some((w) => normalize(l).includes(w.trim()))))

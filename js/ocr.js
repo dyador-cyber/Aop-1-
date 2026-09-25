@@ -56,7 +56,8 @@ async function prepareReceipt(blob, maxSide = 2400) {
   const box = findPaper(data, W, H) || { x: 0, y: 0, w: W, h: H };
   const bin = binarize(box.w === W && box.h === H ? data : crop(data, W, box), box.w, box.h, { windowFrac: 1 / 16, t: 0.15 });
   canvas.width = canvas.height = 1; // eliberează memoria
-  return { data: bin, width: box.w, height: box.h };
+  // păstrăm și poza întreagă: la o citire slabă mai încercăm o dată, fără decupare și cu prag mai blând
+  return { data: bin, width: box.w, height: box.h, full: data, W, H };
 }
 
 async function toPng(data, width, height) {
@@ -76,17 +77,26 @@ async function pickOrientation(worker, img, onProgress) {
   const band = (w, h) => ({ left: Math.round(w * 0.1), top: Math.round(h * 0.3), width: Math.round(w * 0.8), height: Math.round(h * 0.2) });
   const first = await toPng(img.data, img.width, img.height);
   const c0 = (await worker.recognize(first, { rectangle: band(img.width, img.height) })).data.confidence;
-  if (c0 >= 55) return first;
+  if (c0 >= 55) return { blob: first, deg: 0 };
   onProgress?.('verific orientarea', 0);
-  let best = { blob: first, conf: c0 };
+  let best = { blob: first, conf: c0, deg: 0 };
   for (const deg of [90, 270, 180]) {
     const r = rotate(img.data, img.width, img.height, deg);
     const b = await toPng(r.data, r.width, r.height);
     const c = (await worker.recognize(b, { rectangle: band(r.width, r.height) })).data.confidence;
-    if (c > best.conf + 5) best = { blob: b, conf: c };
+    if (c > best.conf + 5) best = { blob: b, conf: c, deg };
     if (best.conf >= 65) break;
   }
-  return best.blob;
+  return best;
+}
+
+// Cât de bună e o citire: încrederea OCR, dar și câte cuvinte / sume a găsit
+// (o citire aproape goală poate avea încredere mare).
+function readScore(d) {
+  const text = d.text || '';
+  const words = (text.match(/[A-Za-z0-9ĂÂÎȘȚăâîșț]{3,}/g) || []).length;
+  const amounts = (text.match(/\d+[.,]\s?\d{2}\b/g) || []).length;
+  return (d.confidence || 0) * Math.log(2 + words + 3 * amounts);
 }
 
 // Returnează textul recunoscut din imagine (Blob).
@@ -95,12 +105,31 @@ export async function recognize(blob, { digits = false, onProgress } = {}) {
     if (onProgress && m.status) onProgress(m.status, m.progress || 0);
   });
   let input = blob;
+  let img = null;
+  let deg = 0;
   if (!digits) {
     onProgress?.('pregătesc poza', 0);
-    const img = await prepareReceipt(blob).catch(() => null);
-    if (img) input = await pickOrientation(worker, img, onProgress).catch(() => blob);
+    img = await prepareReceipt(blob).catch(() => null);
+    if (img) {
+      const o = await pickOrientation(worker, img, onProgress).catch(() => null);
+      if (o) { input = o.blob; deg = o.deg; }
+    }
   }
-  const { data } = await worker.recognize(input);
+  let { data } = await worker.recognize(input);
+  // Citire slabă (hârtie decolorată, umbre, bonul decupat greșit): a doua încercare pe poza întreagă,
+  // cu un prag mai blând care păstrează și literele șterse. Rămâne varianta citită mai bine.
+  if (img && data.confidence < 70) {
+    try {
+      onProgress?.('recitesc mai atent', 0);
+      const soft = binarize(img.full, img.W, img.H, { windowFrac: 1 / 12, t: 0.08 });
+      // pe hârtia ștearsă și orientarea poate fi ghicită greșit: încercăm și poza nerotită
+      for (const d of deg ? [deg, 0] : [0]) {
+        const r = rotate(soft, img.W, img.H, d);
+        const next = (await worker.recognize(await toPng(r.data, r.width, r.height))).data;
+        if (readScore(next) > readScore(data)) data = next;
+      }
+    } catch { /* rămâne prima citire */ }
+  }
   return (data.text || '').slice(0, 20000);
 }
 
