@@ -181,8 +181,11 @@ export function parseReceipt(text, today = new Date(), { storeRules = {} } = {})
   };
   // „DATE FIRMA : LISSE MARKET SRL” – cea mai sigură sursă, când există
   const dateFirma = lines.map((l) => l.match(/(?:\b[a-z]{0,2}te\s*)?\bfirm[ae]\s*[:.]\s*(.{3,})$/i)?.[1]).find(Boolean);
-  const storeLine = (dateFirma && tidy(dateFirma))
-    || head.map(tidy).find((l) => LEGAL_FORM.test(l) && !isNoise(l))
+  const legalLine = head.map(tidy).find((l) => LEGAL_FORM.test(l) && !isNoise(l));
+  const firma = dateFirma && tidy(dateFirma);
+  // „DATE FIRMA” citit cu forma juridică stricată („LISSE MARKET sp O”): antetul cu SRL e mai curat
+  const storeLine = (firma && (LEGAL_FORM.test(firma) || !legalLine) && firma)
+    || legalLine
     || head.map(tidy).find((l) => STORE_HINTS.some((h) => h.words.some((w) => normalize(l).includes(w.trim()))))
     || head.map(tidy).find((l) => !isNoise(l));
 
