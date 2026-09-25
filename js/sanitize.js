@@ -40,7 +40,7 @@ const SCHEMAS = {
       id: id(i?.id), name: str(i?.name, 100).trim(), qty: numOrNull(i?.qty, -1e5, 1e5), unitPrice: numOrNull(i?.unitPrice, -1e7, 1e7),
       amount: numOrNull(i?.amount, -1e7, 1e7), sub: SUBCAT_KEYS.has(i?.sub) ? i.sub : 'other',
       ean: typeof i?.ean === 'string' && /^\d{8,14}$/.test(i.ean) ? i.ean : '', ocrName: str(i?.ocrName, 100),
-      projectId: id(i?.projectId),
+      projectId: id(i?.projectId), confirmed: bool(i?.confirmed),
     })).filter((i) => i.id && i.name && i.amount !== null),
     fuel: o.fuel && typeof o.fuel === 'object' ? {
       liters: numOrNull(o.fuel.liters, 0, 1e5), pricePerLiter: numOrNull(o.fuel.pricePerLiter, 0, 1e4),
@@ -75,6 +75,11 @@ const SCHEMAS = {
     sub: SUBCAT_KEYS.has(o.sub) ? o.sub : 'tools', location: str(o.location, 60).trim(),
     status: INV_STATUS_KEYS.has(o.status) ? o.status : 'avail', lentTo: str(o.lentTo, 80).trim(), lentDate: date(o.lentDate),
     warrantyUntil: date(o.warrantyUntil), notes: str(o.notes, 1000), image: image(o.image), auto: bool(o.auto), edited: bool(o.edited),
+    unit: Math.round(numOrNull(o.unit, 0, 1000) ?? 0), label: typeof o.label === 'string' && /^[A-Z]{1,3}\d{1,4}$/.test(o.label) ? o.label : '', serial: str(o.serial, 60).trim(),
+    loans: (Array.isArray(o.loans) ? o.loans : []).slice(-100).map((l) => ({
+      to: str(l?.to, 80).trim(), from: date(l?.from), back: date(l?.back),
+      state: ['ok', 'broken', 'repair', 'missing'].includes(l?.state) ? l.state : '', note: str(l?.note, 300),
+    })).filter((l) => l.to || l.from),
     returns: (Array.isArray(o.returns) ? o.returns : []).slice(0, 50)
       .map((r) => ({ expenseId: id(r?.expenseId), itemId: id(r?.itemId), qty: Math.round(numOrNull(r?.qty, 1, 1e4) ?? 1) }))
       .filter((r) => r.expenseId && r.itemId),
@@ -138,6 +143,17 @@ export function sanitizeItemNames(obj) {
   if (!obj || typeof obj !== 'object') return out;
   for (const [k, v] of Object.entries(obj).slice(0, 5000)) {
     if (typeof k === 'string' && k.length <= 60 && /^[a-z0-9 ]+$/.test(k) && typeof v === 'string' && v.trim()) out[k] = str(v, 100).trim();
+  }
+  return out;
+}
+
+// Cămara: { cheie produs -> { name, used, resetAt } } pentru produsele cu ⭐.
+export function sanitizePantry(obj) {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const [k, v] of Object.entries(obj).slice(0, 500)) {
+    if (typeof k !== 'string' || k.length > 60 || !/^[a-z0-9 .x]+$/.test(k) || !v || typeof v !== 'object') continue;
+    out[k] = { key: k, name: str(v.name, 100).trim() || k, used: numOrNull(v.used, 0, 1e6) ?? 0, resetAt: date(v.resetAt) };
   }
   return out;
 }

@@ -6,11 +6,14 @@ export { isReturnText } from './parsers.js';
 // Subcategorii de produse. Cuvintele-cheie sunt fără diacritice; un cuvânt de minim 4 litere
 // se potrivește și ca început de cuvânt („surubelnit” → „șurubelniță”, „surubelnite”).
 export const SUBCATS = [
-  { key: 'tools', group: 'tools', name: 'Scule & unelte', color: '#455a64', words: ['burghiu', 'burghie', 'bit', 'biti', 'surubelnit', 'ciocan', 'bormasin', 'flex', 'polizor', 'fierastrau', 'panza', 'cheie', 'chei', 'clesti', 'clest', 'patent', 'cutter', 'ruleta', 'nivela', 'boloboc', 'spaclu', 'mistrie', 'disc taiere', 'disc', 'trusa', 'set scule', 'menghina', 'capsator', 'pistol silicon', 'autofiletant', 'imbus', 'lanterna', 'scara',
+  { key: 'tools', group: 'tools', name: 'Scule & unelte', color: '#455a64', words: ['surubelnit', 'ciocan', 'bormasin', 'flex', 'polizor', 'fierastrau', 'cheie', 'chei', 'clesti', 'clest', 'patent', 'cutter', 'ruleta', 'nivela', 'boloboc', 'spaclu', 'mistrie', 'trusa', 'set scule', 'menghina', 'capsator', 'pistol silicon', 'autofiletant', 'imbus', 'lanterna', 'scara', 'surubelnita electrica', 'masina de insurubat',
     'proiector', 'reflector', 'lampa lucru', 'lampa de lucru', 'compresor', 'generator', 'aparat sudura', 'invertor sudura', 'sudura', 'drujba', 'motofierastrau',
     'polizor unghiular', 'rotopercutor', 'ciocan rotopercutor', 'masina de gaurit', 'masina gaurit', 'autofiletanta', 'slefuitor', 'slefuitoare', 'freza', 'rindea',
     'banc de lucru', 'nivela laser', 'telemetru', 'multimetru', 'tester', 'pistol lipit', 'ciocan lipit', 'trusa scule', 'cutie scule', 'aspirator industrial',
-    'fierastrau circular', 'fierastrau pendular', 'pendular', 'malaxor', 'betoniera', 'dalta', 'topor', 'ferastrau', 'set biti', 'set burghie', 'cheie dinamometrica'] },
+    'fierastrau circular', 'fierastrau pendular', 'pendular', 'malaxor', 'betoniera', 'dalta', 'topor', 'ferastrau', 'cheie dinamometrica'] },
+  // consumabilele sculelor: nu intră în inventar ca bucăți, dar se leagă de sculă (disc 125 → polizor 125)
+  { key: 'consumables', group: 'tools', name: 'Consumabile scule', color: '#78909c', words: ['disc', 'discuri', 'disc taiere', 'disc slefuire', 'disc flex', 'disc diamantat', 'burghiu', 'burghie', 'bit', 'biti', 'set biti', 'set burghie',
+    'panza', 'panze', 'lama', 'lame', 'lama cutter', 'electrod', 'electrozi', 'sarma sudura', 'capse', 'perie sarma', 'carota', 'freza lemn', 'fir motocoasa', 'lant drujba'] },
   { key: 'materials', group: 'house', name: 'Materiale – construcții', color: '#8d6e63', words: ['ciment', 'adeziv', 'bca', 'caramida', 'boltari', 'mortar', 'glet', 'var', 'nisip', 'pietris', 'beton', 'fier beton', 'otel beton', 'plasa sudata', 'plasa', 'polistiren', 'vata minerala', 'vata bazaltica', 'rigips', 'gips', 'gipscarton', 'profil', 'cuie', 'surub', 'suruburi', 'diblu', 'dibluri', 'ancora', 'spuma', 'silicon', 'chit', 'gresie', 'faianta', 'parchet', 'osb', 'cherestea', 'scandura', 'grinda', 'rigla', 'tigla', 'membrana', 'hidroizolatie', 'sapa', 'amorsa', 'izolatie', 'tencuiala', 'coltar', 'bitum', 'dala', 'pavaj', 'bordura'] },
   { key: 'electrical', group: 'house', name: 'Materiale – electrice', color: '#f9a825', words: ['cablu', 'conductor', 'priza', 'intrerupator', 'bec', 'led', 'doza', 'siguranta', 'prelungitor', 'stecher', 'tablou electric', 'corp iluminat', 'lampa', 'lustra', 'banda led', 'baterii', 'acumulator', 'incarcator', 'wago', 'copex', 'tub flexibil', 'myym', 'nym', 'nyy', 'cyy', 'mylyy', 'cyaby', 'colier', 'coliere', 'colieri', 'clema', 'cleme', 'pini', 'papuc', 'papuci', 'tub izolator', 'banda izolatoare', 'izolati', 'protectie diferentiala', 'disjunctor', 'contor'] },
   { key: 'plumbing', group: 'house', name: 'Materiale – instalații sanitare', color: '#0288d1', words: ['teava', 'tevi', 'fiting', 'cot', 'mufa', 'robinet', 'baterie lavoar', 'baterie dus', 'baterie', 'sifon', 'vas wc', 'lavoar', 'cada', 'cabina dus', 'para dus', 'pvc', 'ppr', 'racord', 'garnitura', 'pompa', 'boiler', 'calorifer', 'radiator', 'teflon', 'canalizare', 'rezervor wc'] },
@@ -36,7 +39,7 @@ export const SUBCATS = [
 // „alias” = cuvinte după care poți întreba („mâncare”, „materiale”).
 export const GROUPS = [
   { key: 'house', name: '🏠 Materiale casă', alias: 'materiale constructie constructii' },
-  { key: 'tools', name: '🔧 Scule', alias: 'scule unelte' },
+  { key: 'tools', name: '🔧 Scule & consumabile', alias: 'scule unelte consumabile' },
   { key: 'food', name: '🛒 Alimente & băuturi', alias: 'mancare alimente' },
   { key: 'household', name: '🧽 Curățenie & igienă', alias: 'curatenie igiena' },
   { key: 'garden', name: '🌱 Grădină', alias: 'gradina' },
@@ -84,6 +87,8 @@ export function classifyItem(name, learned = {}, ean = '') {
     }
   }
   if (best === 'other') best = fuzzyClass(toks);
+  // „PÂNZĂ FIERĂSTRĂU PENDULAR”: primul cuvânt spune ce e (pânza), restul spune pentru ce sculă
+  if (best === 'tools' && firstMatch(toks, consWords()) >= 0 && firstMatch(toks, consWords()) < firstMatch(toks, toolWords())) best = 'consumables';
   return best;
 }
 
@@ -101,6 +106,21 @@ function fuzzyClass(toks) {
     }
   }
   return 'other';
+}
+
+// Sculă sau consumabil? Nesigur când numele începe cu o sculă, dar are și un consumabil
+// („POLIZOR 125 + DISC”): atunci îl întrebăm pe utilizator (zona „De verificat”).
+const toolWords = () => SUBCATS.find((c) => c.key === 'tools').words;
+const consWords = () => SUBCATS.find((c) => c.key === 'consumables').words;
+function firstMatch(toks, words) {
+  const i = toks.findIndex((t) => words.some((w) => !w.includes(' ') && (t === w || (w.length >= 4 && t.startsWith(w)))));
+  return i < 0 ? Infinity : i;
+}
+export function toolDoubt(name) {
+  const toks = tokens(name);
+  const t = firstMatch(toks, toolWords());
+  const c = firstMatch(toks, consWords());
+  return t !== Infinity && c !== Infinity && t < c;
 }
 
 // Garanția SGR, și când OCR citește „CARANTIE SCR”
