@@ -104,7 +104,7 @@ function fuzzyClass(toks) {
 }
 
 // Garanția SGR, și când OCR citește „CARANTIE SCR”
-const SGR_RE = /\b[gc]arant[il]e\s+s[gc][rp]\b|\bsgr\b/;
+const SGR_RE = /\b[gc]arant[il]e\s+s[gc][rp]\b|\bsgr\b|\bs[gcoq][rp]\s+(sticla|doza|pet|plastic)\b/;
 
 // Codul de bare (EAN-8/12/13/14) e valid dacă cifra de control se potrivește.
 export function validEan(code) {
@@ -115,9 +115,10 @@ export function validEan(code) {
   return (10 - (sum % 10)) % 10 === +d[d.length - 1];
 }
 
-// Rânduri „nume cantitate BUCATA X preț = sumă” (casele de marcat din magazinele mici, ex. Lisse):
+// Rânduri „nume cantitate BUCATA X preț = sumă” (casele de marcat din magazinele mici, ex. Lisse);
+// „BUCATA” e acceptat și citit greșit („BUCHTH”, „BUCRTA”, „BUCAIA”):
 //   „FRANZELA LIDER PAN 300G 2 BUCATA x 2.50= 5.00 B”; cantitatea poate lipsi sau fi citită „|”, „!”.
-const BUCATA = /^(.*?)\s*(-?\d+(?:[.,]\d{1,3})?|[|!lI\]])?\s*\bbucat[ai]\b\.?\s*[xX×*]\s*(\d+(?:[.,]\s?\d{1,2})?(?:\s\d{2}(?!\d))?)\s*[=\-–]?\s*(.*)$/i;
+const BUCATA = /^(.*?)\s*(-?\d+(?:[.,]\d{1,3})?|[|!lI\]])?\s*\b[bB8][uUvV][cC][a-zA-Z]{2,3}\b\.?\s*[xX×*]\s*(\d+(?:[.,]\s?\d{1,2})?(?:\s\d{2}(?!\d))?)\s*[=\-–]?\s*(.*)$/i;
 function unitFrom(s) {
   let t = s.trim();
   if (/^\d+\s\d{2}$/.test(t)) t = t.replace(/\s/, '.'); // „7 00” = 7,00

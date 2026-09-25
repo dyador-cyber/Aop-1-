@@ -105,3 +105,19 @@ VISA DEBIT`, new Date('2026-09-25'));
   assert.equal(r.total, 1696.12);
   assert.equal(r.totalSource, 'total');
 });
+
+test('bon Lisse decolorat: „BUCATA” și „SGR” citite greșit', () => {
+  const text = `TE FIRMA : LISSE MARKET SRI
+» » NTE SOR STICLA 1 BUCATA x 0.50: 5
+~ Pp FONT IE SCR DOZA | BUCAIA x 0.50- 7 [ie
+: dB “NG LISSE 1 BUCRTA x 1.00= 1 in.
+“3RLBORD GOLD ORIG. 1005
+J 1 BUCATA x 32.50= 2.50 -
+FRANZELA 2 BUCHTH x 2.50= 5.00 B`;
+  assert.equal(parseReceipt(text).store, 'Lisse Market');
+  const items = parseItems(text);
+  assert.deepEqual(items.map((i) => i.amount), [0.5, 0.5, 1, 32.5, 5]);
+  assert.equal(classifyItem(items[0].name), 'sgr');
+  assert.equal(classifyItem(items[1].name), 'sgr');
+  assert.equal(items[3].name.includes('GOLD'), true);
+});
