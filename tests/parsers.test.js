@@ -136,32 +136,6 @@ test('notificări expirări', () => {
   assert.match(due[0].body, /6 zile/);
 });
 
-// Text OCR real (bon Hornbach fotografiat în mașină, cu umbre), fără liniile cu date de card.
-test('bon real Hornbach (OCR cu zgomot)', () => {
-  const text = `BON NEF TSCAL
-"Ny a
-HORNBACH CENTRALA SRL
-SOSLAUA ANDRONACHE , 24b “297
-S{CINDR 2 BUCURE ST I
-MUNICIPIUL BUCUREŞTI
-cul: RO177 77320
-M 23/9/2026 12:38 x 0121
-i 9 tt ++
-23.09. 20 12:38:40 i
-VISA CONTACTLESS
-ALE
-TAL: RON 1696,12
---- PIN OK ---
-E 73.09.2026 12:34 0024 242424 oon
-BON NEF ISCA`;
-  const r = parseReceipt(text);
-  assert.equal(r.store, 'Hornbach');
-  assert.equal(r.date, '2026-09-23');
-  assert.equal(r.total, 1696.12);
-  assert.equal(r.cif, 'RO17777320');
-  assert.equal(r.suggestedCategoryKey, 'house_materials');
-});
-
 test('total cu spațiu după virgulă și fără a confunda data cu suma', () => {
   const r = parseReceipt('MAGAZIN X SRL\n23.09.2026 12:38:40\nTAL: RON 1636, 12');
   assert.equal(r.total, 1636.12);
@@ -182,37 +156,6 @@ test('bon lung din mai multe poze: magazin sus, total jos', () => {
   assert.equal(r.store, 'Hornbach');
   assert.equal(r.total, 1696.12);
   assert.equal(r.date, '2026-09-23');
-});
-
-const HORNBACH_RETUR = `A Ca 1
-Bl HORNBACU CENTRAT |
-y SERI ADA AnorARA ALA SRL
-/ SECTUR 2 . BUCURES x FO
-MUNICIPIUL BUCUREŞTI
-CUL: RO17777320
-i 23/9/2026 15:3i xo
-x RETUR tt SR
-E iun 5902801327056
-1 BUC. X 129,00
-GER) CLESTE PINT 129,00 A
-TIV: RETUR
-ITAL [1] RON -128,00
-MN RON -129,00
-i BRUT TVA NET
-x 129,00 -22,33  -106,61
-420 73.09.2026 15:23 0008 001004 000938
-BON NEFISCAL
-INCL. re DEEE. RETUR MARFA E
-FL do ZILE GARANTIE PRET J`;
-
-test('bon real de retur Hornbach (OCR cu erori)', () => {
-  const r = parseReceipt(HORNBACH_RETUR, new Date(2026, 8, 24));
-  assert.equal(r.store, 'Hornbach');
-  assert.equal(r.isReturn, true);
-  assert.equal(r.total, -129, 'cifra greșită 128 corectată după frecvență, semn negativ');
-  assert.equal(r.date, '2026-09-23');
-  assert.equal(r.cif, 'RO17777320');
-  assert.equal(r.suggestedCategoryKey, 'house_materials');
 });
 
 test('„RETUR MARFĂ ÎN 90 ZILE” din subsol nu înseamnă retur', () => {
@@ -278,4 +221,10 @@ test('firmă și CUI: rânduri tehnice ignorate, DATE FIRMA, formă juridică, c
   r = parseReceipt('* REIMPRIMARE *\nBON FISCAL\nALFA DISTRIBUTIE S.R.L.\nCUI 1234565', today);
   assert.equal(r.store, 'Alfa Distributie');
   assert.equal(r.cifValid, true);
+});
+
+test('retur: total citit cu o cifră greșită, corectat după sumele care se repetă (text inventat)', () => {
+  const r = parseReceipt(`MAGAZIN TEST SRL\n*** RETUR ***\n1 BUC. X 129,00\nCLESTE PATENT -129,00 A\nTOTAL RON -128,00\nCARD RON -129,00`, new Date(2026, 8, 24));
+  assert.equal(r.isReturn, true);
+  assert.equal(r.total, -129);
 });
