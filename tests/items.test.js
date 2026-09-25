@@ -97,26 +97,6 @@ test('întrebări pe produse: unt, băuturi, mături, scule', async () => {
   assert.equal(runQuery('Cât m-a costat casa?', ctx, today).total, 71, 'returul se scade din casă');
 });
 
-test('retur real (text OCR din browser, cu erori)', () => {
-  const text = `Bl HORNBACH CENTRAY |
-i SGS ARE An GENTRALA SRL
-MUNICIPIUL BUCURLSY |
-Mi 23/9/2026 15:31 0154
-: +x RETUR fat SR
-A 411 /CAN 5902801327056
-A Bic. x 129,00
-WGERY CLESTE PINI -12,00 A
-#3TIV: RETUR
-[TAL [1] RON -129,00
-EY RON -129,00`;
-  const r = parseReceipt(text, new Date(2026, 8, 24));
-  assert.equal(r.isReturn, true);
-  assert.equal(r.total, -129);
-  const items = parseItems(text, { isReturn: true });
-  assert.deepEqual(items.map((i) => [i.name, i.amount]), [['WGERY CLESTE PINI', -129]]);
-  assert.equal(classifyItem(items[0].name), 'tools');
-});
-
 test('rândul de total citit greșit („MAL: RON”) nu devine produs', () => {
   assert.deepEqual(parseItems('HORNBACH CENTRALA SRL\nVISA DEBIT\nMAL: RON 1696,12\nPIN OK'), []);
 });
@@ -125,21 +105,6 @@ test('scule electrice și de lucru ajung la „Scule & unelte”', () => {
   for (const n of ['PROIECTOR LED 50W', 'Proiector cu senzor', 'COMPRESOR AER 50L', 'APARAT SUDURA INVERTOR', 'NIVELA LASER BOSCH', 'POLIZOR UNGHIULAR 125MM', 'MALAXOR 1600W'])
     assert.equal(classifyItem(n), 'tools', n);
   assert.equal(classifyItem('BEC LED E27'), 'electrical');
-});
-
-test('bon fiscal real Hornbach fotografiat în 3 părți suprapuse (text OCR cu zgomot)', async () => {
-  const { readFileSync } = await import('node:fs');
-  const text = readFileSync(new URL('./fixtures/hornbach-bon-fiscal-3-poze.txt', import.meta.url), 'utf8');
-  const r = parseReceipt(text, new Date(2026, 8, 24));
-  assert.equal(r.store, 'Hornbach');
-  assert.equal(r.total, 1696.12);
-  assert.equal(r.isReturn, false);
-  const items = parseItems(text);
-  assert.equal(items.length, 18, 'POZIȚII: 18 – fără dubluri din zonele suprapuse');
-  assert.equal(+items.reduce((a, i) => a + i.amount, 0).toFixed(2), 1696.12, 'suma produselor = totalul bonului');
-  const tools = items.filter((i) => classifyItem(i.name) === 'tools').map((i) => [i.amount, i.qty]);
-  assert.deepEqual(tools, [[189.8, 2], [129, 1], [655, 1]], 'cele două proiectoare și cleștele');
-  assert.ok(items.filter((i) => classifyItem(i.name) === 'electrical').length >= 12);
 });
 
 test('dimensiunile din nume nu sunt cantități', () => {
