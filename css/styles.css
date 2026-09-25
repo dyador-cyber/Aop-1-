@@ -382,3 +382,20 @@ nav.tabs { z-index: 13; }
 .chip-wrap { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .chip-wrap .chip-s { margin: 0; white-space: nowrap; }
 .chip-s .dot { margin: 0 2px 0 0; flex: none; }
+
+/* ---------- Etapa 4: vehicule ---------- */
+.veh-id { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+.doc-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.doc-btns button { flex: 1 1 140px; }
+.small-seg { margin: 0 0 8px; }
+.small-seg button { font-size: .85rem; padding: 6px 10px; }
+.doc-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+.ocr-box { background: var(--bg); border-radius: 12px; padding: 10px; margin: 6px 0 10px; }
+.ocr-box button { width: 100%; }
+.form fieldset legend { font-weight: 700; }
+.month-bars { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; height: 120px; align-items: end; margin: 8px 0; }
+.month-bars div { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; }
+.month-bars span { width: 70%; min-height: 2px; background: var(--accent-2); border-radius: 4px 4px 0 0; }
+.month-bars small { font-size: .68rem; color: var(--muted); }
+@media print { #print-area figure { display: inline-block; width: 48%; margin: 1%; } #print-area figure img { max-height: 10cm; } #print-area figcaption { font-size: 9pt; text-align: center; } }
+.stat-row .stat b { overflow-wrap: break-word; font-size: .98rem; letter-spacing: -.2px; }

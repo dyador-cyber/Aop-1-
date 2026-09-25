@@ -418,7 +418,7 @@ function expenseStems(e, ctx) {
 }
 
 export function isFuelExpense(e, ctx) {
-  if (e.fuel && e.fuel.liters > 0) return true;
+  if (e.fuel && (e.fuel.liters > 0 || e.fuel.kwh > 0)) return true;
   const cat = ctx.categories.find((c) => c.id === e.categoryId);
   return !!cat?.isFuel;
 }
